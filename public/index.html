@@ -1,0 +1,879 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AT&T Billing Data Processor</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: Arial, sans-serif;
+      background: #f0f4f8;
+      color: #1a202c;
+      min-height: 100vh;
+    }
+
+    header {
+      background: linear-gradient(135deg, #1F4E79, #2e75b6);
+      color: white;
+      padding: 20px 32px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+    }
+
+    header .logo {
+      font-size: 28px;
+      font-weight: 900;
+      letter-spacing: -1px;
+      background: white;
+      color: #1F4E79;
+      width: 44px; height: 44px;
+      border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+    }
+
+    header h1 { font-size: 20px; font-weight: 700; }
+    header p { font-size: 13px; opacity: 0.85; margin-top: 2px; }
+
+    .container { max-width: 960px; margin: 0 auto; padding: 32px 20px; }
+
+    .section-title {
+      font-size: 13px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      color: #4a5568;
+      margin-bottom: 14px;
+    }
+
+    .card {
+      background: white;
+      border-radius: 12px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+      padding: 24px;
+      margin-bottom: 20px;
+    }
+
+    .upload-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 16px;
+    }
+
+    .upload-zone {
+      border: 2px dashed #cbd5e0;
+      border-radius: 10px;
+      padding: 20px 16px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.2s;
+      position: relative;
+      background: #f7fafc;
+    }
+
+    .upload-zone:hover, .upload-zone.drag-over {
+      border-color: #2e75b6;
+      background: #ebf4ff;
+    }
+
+    .upload-zone.has-file {
+      border-color: #38a169;
+      background: #f0fff4;
+    }
+
+    .upload-zone input[type="file"] {
+      position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;
+    }
+
+    .upload-icon { font-size: 28px; margin-bottom: 8px; }
+
+    .upload-zone .label {
+      font-size: 13px;
+      font-weight: 700;
+      color: #2d3748;
+      margin-bottom: 4px;
+    }
+
+    .upload-zone .sublabel {
+      font-size: 11px;
+      color: #718096;
+    }
+
+    .upload-zone .filename {
+      display: none;
+      font-size: 12px;
+      color: #38a169;
+      font-weight: 600;
+      margin-top: 8px;
+      word-break: break-all;
+    }
+
+    .upload-zone.has-file .filename { display: block; }
+    .upload-zone.has-file .upload-icon { opacity: 0.4; }
+
+    .badge-required {
+      display: inline-block;
+      background: #fed7d7;
+      color: #c53030;
+      font-size: 10px;
+      font-weight: 700;
+      padding: 1px 6px;
+      border-radius: 4px;
+      margin-left: 6px;
+      vertical-align: middle;
+    }
+
+    .badge-optional {
+      display: inline-block;
+      background: #e2e8f0;
+      color: #4a5568;
+      font-size: 10px;
+      font-weight: 700;
+      padding: 1px 6px;
+      border-radius: 4px;
+      margin-left: 6px;
+      vertical-align: middle;
+    }
+
+    .actions { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+
+    .btn {
+      padding: 12px 28px;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.2s;
+      display: inline-flex; align-items: center; gap: 8px;
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, #1F4E79, #2e75b6);
+      color: white;
+    }
+
+    .btn-primary:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(31,78,121,0.4); }
+    .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .btn-secondary {
+      background: #e2e8f0;
+      color: #2d3748;
+    }
+    .btn-secondary:hover { background: #cbd5e0; }
+
+    .btn-success {
+      background: linear-gradient(135deg, #276749, #38a169);
+      color: white;
+    }
+    .btn-success:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(56,161,105,0.4); }
+
+    .spinner {
+      width: 16px; height: 16px;
+      border: 2px solid rgba(255,255,255,0.4);
+      border-top-color: white;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      display: none;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .progress-bar-wrap {
+      height: 6px; background: #e2e8f0; border-radius: 3px; overflow: hidden;
+      display: none; margin-top: 16px;
+    }
+    .progress-bar {
+      height: 100%; width: 0; background: linear-gradient(90deg, #2e75b6, #38a169);
+      border-radius: 3px; transition: width 0.4s ease;
+    }
+
+    #status-msg {
+      font-size: 13px; color: #4a5568; margin-top: 10px; display: none;
+    }
+
+    #results { display: none; }
+
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 14px;
+      margin-bottom: 20px;
+    }
+
+    .stat-card {
+      background: #f7fafc;
+      border-radius: 10px;
+      padding: 16px;
+      text-align: center;
+      border: 1px solid #e2e8f0;
+    }
+
+    .stat-card .value {
+      font-size: 28px;
+      font-weight: 900;
+      line-height: 1;
+      margin-bottom: 4px;
+    }
+
+    .stat-card .label { font-size: 11px; color: #718096; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+
+    .stat-card.blue .value { color: #2e75b6; }
+    .stat-card.green .value { color: #38a169; }
+    .stat-card.red .value { color: #e53e3e; }
+    .stat-card.orange .value { color: #dd6b20; }
+
+    .breakdown-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+
+    @media (max-width: 600px) { .breakdown-grid { grid-template-columns: 1fr; } }
+
+    .breakdown-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .breakdown-table th {
+      text-align: left; padding: 8px 10px;
+      background: #edf2f7; font-size: 11px; text-transform: uppercase;
+      letter-spacing: 0.5px; color: #4a5568;
+    }
+    .breakdown-table td { padding: 8px 10px; border-bottom: 1px solid #f0f4f8; }
+    .breakdown-table tr:last-child td { border-bottom: none; }
+    .breakdown-table .count { text-align: right; font-weight: 700; color: #2e75b6; }
+
+    .alert {
+      padding: 14px 16px;
+      border-radius: 8px;
+      font-size: 13px;
+      margin-bottom: 16px;
+      display: flex; gap: 10px; align-items: flex-start;
+    }
+
+    .alert-warning { background: #fffbeb; border: 1px solid #f6e05e; color: #744210; }
+    .alert-success { background: #f0fff4; border: 1px solid #9ae6b4; color: #276749; }
+    .alert-error { background: #fff5f5; border: 1px solid #fc8181; color: #822727; }
+
+    .unidentified-list {
+      max-height: 220px;
+      overflow-y: auto;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      font-size: 12px;
+    }
+
+    .unidentified-list table { width: 100%; border-collapse: collapse; }
+    .unidentified-list th {
+      position: sticky; top: 0;
+      background: #edf2f7; padding: 8px 12px;
+      font-size: 11px; text-align: left; text-transform: uppercase;
+      letter-spacing: 0.5px; color: #4a5568;
+    }
+    .unidentified-list td { padding: 7px 12px; border-bottom: 1px solid #f7fafc; }
+    .unidentified-list tr:last-child td { border-bottom: none; }
+
+    .tag {
+      display: inline-block;
+      padding: 2px 7px; border-radius: 4px;
+      font-size: 11px; font-weight: 600;
+      margin: 1px;
+    }
+    .tag-clec { background: #fed7d7; color: #c53030; }
+    .tag-soc { background: #fefcbf; color: #975a16; }
+    .tag-plan { background: #e9d8fd; color: #6b46c1; }
+
+    #error-msg {
+      display: none;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="logo">AT</div>
+  <div>
+    <h1>AT&T Billing Data Processor</h1>
+    <p>Automate your monthly billing working copy — CLEC lookup, SOC codes, plan rates, NAL overrides</p>
+  </div>
+</header>
+
+<div class="container">
+
+  <!-- Step 1: Upload Files -->
+  <div class="card">
+    <div class="section-title">Step 1 — Upload Files</div>
+    <div class="upload-grid">
+
+      <div class="upload-zone" id="zone-raw" ondragover="onDrag(event,this)" ondragleave="offDrag(this)" ondrop="onDrop(event,this,'rawFile')">
+        <input type="file" id="rawFile" accept=".xlsx,.xls" onchange="onFile(this,'zone-raw')" />
+        <div class="upload-icon">📄</div>
+        <div class="label">Raw File (Vendor Data) <span class="badge-required">Required</span></div>
+        <div class="sublabel">Current billing period from vendor</div>
+        <div class="filename" id="fn-raw"></div>
+      </div>
+
+      <div class="upload-zone" id="zone-prev" ondragover="onDrag(event,this)" ondragleave="offDrag(this)" ondrop="onDrop(event,this,'prevWorking')">
+        <input type="file" id="prevWorking" accept=".xlsx,.xls" onchange="onFile(this,'zone-prev')" />
+        <div class="upload-icon">📋</div>
+        <div class="label">Previous Working Copy <span class="badge-optional">Recommended</span></div>
+        <div class="sublabel">Last month's file for CLEC / SOC / Plan lookup</div>
+        <div class="filename" id="fn-prev"></div>
+      </div>
+
+      <div class="upload-zone" id="zone-nal" ondragover="onDrag(event,this)" ondragleave="offDrag(this)" ondrop="onDrop(event,this,'nalMasterlist')">
+        <input type="file" id="nalMasterlist" accept=".xlsx,.xls" onchange="onFile(this,'zone-nal')" />
+        <div class="upload-icon">📑</div>
+        <div class="label">NAL Masterlist <span class="badge-optional">Recommended</span></div>
+        <div class="sublabel">For NAL plan change overrides (Combine-2026 tab)</div>
+        <div class="filename" id="fn-nal"></div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Step 2: Process -->
+  <div class="card">
+    <div class="section-title">Step 2 — Process & Download</div>
+    <div class="actions">
+      <button class="btn btn-primary" id="btn-preview" onclick="runPreview()">
+        <span>Preview Summary</span>
+        <div class="spinner" id="spin-preview"></div>
+      </button>
+      <button class="btn btn-success" id="btn-download" onclick="runDownload()" style="display:none">
+        <span>&#8595; Download Working Copy</span>
+        <div class="spinner" id="spin-dl"></div>
+      </button>
+      <button class="btn btn-secondary" onclick="resetAll()" style="font-size:13px">Reset</button>
+    </div>
+    <div class="progress-bar-wrap" id="progress-wrap">
+      <div class="progress-bar" id="progress-bar"></div>
+    </div>
+    <div id="status-msg"></div>
+    <div id="error-msg" class="alert alert-error" style="margin-top:14px">
+      <span>⚠️</span><span id="error-text"></span>
+    </div>
+  </div>
+
+  <!-- Wrong file warning -->
+  <div id="wrong-file-warning" class="alert alert-error" style="display:none;margin-bottom:16px">
+    <span>⛔</span><span id="wrong-file-text"></span>
+  </div>
+
+  <!-- Results -->
+  <div id="results">
+
+    <!-- Stat cards -->
+    <div class="card">
+      <div class="section-title">Processing Summary</div>
+      <div class="summary-grid" id="stat-grid"></div>
+      <div id="alert-unidentified" style="margin-top:14px"></div>
+    </div>
+
+    <!-- Unidentified breakdown -->
+    <div class="card" id="unid-breakdown-card" style="display:none">
+      <div class="section-title" style="color:#c53030;margin-bottom:14px">Unidentified Breakdown — Action Required</div>
+      <div class="breakdown-grid" style="margin-bottom:14px">
+        <div>
+          <table class="breakdown-table">
+            <thead><tr><th>Missing Field</th><th class="count">Row Count</th></tr></thead>
+            <tbody id="unid-breakdown-tbody"></tbody>
+          </table>
+        </div>
+        <div style="font-size:13px;color:#718096;padding-top:8px">
+          Send the MDN list (in the downloaded file's <strong>Unidentified MDNs</strong> sheet) to Gopal or Camilo. Update the Working Copy once they respond.
+        </div>
+      </div>
+      <div class="unidentified-list">
+        <table>
+          <thead><tr><th>MDN</th><th>Name</th><th>Missing</th></tr></thead>
+          <tbody id="unid-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Billing Summary -->
+    <div class="card">
+      <div class="section-title" style="margin-bottom:14px">Billing Summary</div>
+      <div style="overflow-x:auto">
+        <table class="breakdown-table" id="billing-table" style="min-width:600px">
+          <thead>
+            <tr>
+              <th>Description</th>
+              <th>Period Covered</th>
+              <th class="count">No. of MDN</th>
+              <th class="count">Amount</th>
+              <th>Remarks</th>
+            </tr>
+          </thead>
+          <tbody id="billing-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- CLEC + Plan breakdown -->
+    <div class="card">
+      <div class="breakdown-grid">
+        <div>
+          <div class="section-title" style="margin-bottom:10px">By CLEC</div>
+          <table class="breakdown-table">
+            <thead><tr><th>CLEC Name</th><th class="count">Rows</th></tr></thead>
+            <tbody id="clec-tbody"></tbody>
+          </table>
+        </div>
+        <div>
+          <div class="section-title" style="margin-bottom:10px">By Plan Rate</div>
+          <table class="breakdown-table">
+            <thead><tr><th>Plan</th><th class="count">Rows</th></tr></thead>
+            <tbody id="plan-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ===================== STEP 2 ===================== -->
+  <div class="card" style="border-top:3px solid #276749;margin-top:8px">
+    <div class="section-title" style="color:#276749">Step 2 — Generate Customer Files</div>
+    <p style="font-size:13px;color:#4a5568;margin-bottom:16px">
+      Upload the finalized Working Copy (from Step 1 download) and the response file from Gopal/Camilo to generate customer billing files.
+    </p>
+
+    <div class="upload-grid" style="margin-bottom:18px">
+
+      <div class="upload-zone" id="s2-zone-wc" ondragover="onDrag(event,this)" ondragleave="offDrag(this)" ondrop="s2OnDrop(event,this,'processedWC')">
+        <input type="file" id="s2-processedWC" accept=".xlsx,.xls" onchange="s2OnFile(this,'s2-zone-wc','s2-fn-wc')" />
+        <div class="upload-icon">📊</div>
+        <div class="label">Processed Working Copy <span class="badge-required">Required</span></div>
+        <div class="sublabel">Output downloaded from Step 1</div>
+        <div class="filename" id="s2-fn-wc"></div>
+      </div>
+
+      <div class="upload-zone" id="s2-zone-gopal" ondragover="onDrag(event,this)" ondragleave="offDrag(this)" ondrop="s2OnDrop(event,this,'gopalFile')">
+        <input type="file" id="s2-gopalFile" accept=".xlsx,.xls" onchange="s2OnFile(this,'s2-zone-gopal','s2-fn-gopal')" />
+        <div class="upload-icon">📩</div>
+        <div class="label">Gopal / Camilo Response <span class="badge-optional">Optional</span></div>
+        <div class="sublabel">CLEC, SOC, Plan Rate for unidentified MDNs</div>
+        <div class="filename" id="s2-fn-gopal"></div>
+      </div>
+
+      <div class="upload-zone" id="s2-zone-telzeqprev" ondragover="onDrag(event,this)" ondragleave="offDrag(this)" ondrop="s2OnDrop(event,this,'telzeqPrevFile')">
+        <input type="file" id="s2-telzeqPrevFile" accept=".xlsx,.xls" onchange="s2OnFile(this,'s2-zone-telzeqprev','s2-fn-telzeqprev')" />
+        <div class="upload-icon">📋</div>
+        <div class="label">Telzeq Previous Customer File <span class="badge-optional">Optional</span></div>
+        <div class="sublabel">Used to identify 1GB-HCD MDNs ($15/mo rate)</div>
+        <div class="filename" id="s2-fn-telzeqprev"></div>
+      </div>
+
+    </div>
+
+    <div class="actions" style="flex-wrap:wrap;gap:10px">
+      <button class="btn btn-success" onclick="s2Download('finalized')">
+        <span>&#8595; Finalized Working Copy</span>
+        <div class="spinner" id="s2-spin-wc"></div>
+      </button>
+      <button class="btn" style="background:linear-gradient(135deg,#2c5282,#3182ce);color:white" onclick="s2Download('telzeq')">
+        <span>&#8595; Telzeq Customer File</span>
+        <div class="spinner" id="s2-spin-telzeq"></div>
+      </button>
+      <button class="btn" style="background:linear-gradient(135deg,#702459,#b83280);color:white" onclick="s2Download('nal')">
+        <span>&#8595; NAL Customer File</span>
+        <div class="spinner" id="s2-spin-nal"></div>
+      </button>
+      <button class="btn btn-secondary" onclick="s2Reset()" style="font-size:13px">Reset</button>
+    </div>
+
+    <div id="s2-status" style="font-size:13px;color:#4a5568;margin-top:10px;display:none"></div>
+    <div id="s2-error" class="alert alert-error" style="display:none;margin-top:14px">
+      <span>⚠️</span><span id="s2-error-text"></span>
+    </div>
+
+    <!-- Rate reference -->
+    <details style="margin-top:18px">
+      <summary style="font-size:12px;font-weight:700;color:#4a5568;cursor:pointer;user-select:none">Rate Reference (click to expand)</summary>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:12px;font-size:12px">
+        <div>
+          <div style="font-weight:700;color:#2c5282;margin-bottom:6px">Telzeq Rates (MIA)</div>
+          <table class="breakdown-table">
+            <thead><tr><th>Plan</th><th class="count">Rate/mo</th></tr></thead>
+            <tbody>
+              <tr><td>1GB SmartPhone</td><td class="count">$7.00</td></tr>
+              <tr><td>1GB Voice and Data</td><td class="count">$7.00</td></tr>
+              <tr><td>1GB-HCD</td><td class="count">$15.00</td></tr>
+              <tr><td>10GB Voice and Data</td><td class="count">$25.50</td></tr>
+              <tr><td>Small Data Plan 50MB</td><td class="count">$5.00</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div>
+          <div style="font-weight:700;color:#702459;margin-bottom:6px">NAL Rates (MIA + Passthrough)</div>
+          <table class="breakdown-table">
+            <thead><tr><th>Plan</th><th class="count">MIA</th><th class="count">PT</th></tr></thead>
+            <tbody>
+              <tr><td>1GB Voice and Data</td><td class="count">$8.00</td><td class="count">$1.51</td></tr>
+              <tr><td>5GB Voice and Data</td><td class="count">$14.00</td><td class="count">$1.51</td></tr>
+            </tbody>
+          </table>
+          <div style="color:#718096;margin-top:8px;line-height:1.5">
+            Overage (1GB only): $11/GB over 1GB, max 3GB ($33)<br>
+            Partial period: MRC pro-rated × (days/30) + $1.51 PT
+          </div>
+        </div>
+      </div>
+    </details>
+  </div>
+
+</div>
+
+<script>
+  const API = '';
+  const files = {};
+
+  function onFile(input, zoneId) {
+    const file = input.files[0];
+    if (!file) return;
+    files[input.id] = file;
+    const zone = document.getElementById(zoneId);
+    zone.classList.add('has-file');
+    document.getElementById('fn-' + zoneId.replace('zone-','')) .textContent = file.name;
+  }
+
+  function onDrag(e, el) { e.preventDefault(); el.classList.add('drag-over'); }
+  function offDrag(el) { el.classList.remove('drag-over'); }
+
+  function onDrop(e, el, fieldName) {
+    e.preventDefault();
+    el.classList.remove('drag-over');
+    const file = e.dataTransfer.files[0];
+    if (!file) return;
+    files[fieldName] = file;
+    el.classList.add('has-file');
+    const suffix = el.id.replace('zone-','');
+    document.getElementById('fn-' + suffix).textContent = file.name;
+    // Also set the file input
+    const inp = el.querySelector('input[type=file]');
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    inp.files = dt.files;
+  }
+
+  function buildFormData() {
+    const fd = new FormData();
+    if (files['rawFile']) fd.append('rawFile', files['rawFile']);
+    if (files['prevWorking']) fd.append('prevWorking', files['prevWorking']);
+    if (files['nalMasterlist']) fd.append('nalMasterlist', files['nalMasterlist']);
+    return fd;
+  }
+
+  function showError(msg) {
+    const el = document.getElementById('error-msg');
+    document.getElementById('error-text').textContent = msg;
+    el.style.display = 'flex';
+  }
+
+  function clearError() {
+    document.getElementById('error-msg').style.display = 'none';
+  }
+
+  function setStatus(msg) {
+    const el = document.getElementById('status-msg');
+    el.textContent = msg;
+    el.style.display = msg ? 'block' : 'none';
+  }
+
+  function animateProgress(targetPct, durationMs) {
+    const bar = document.getElementById('progress-bar');
+    const wrap = document.getElementById('progress-wrap');
+    wrap.style.display = 'block';
+    let cur = parseFloat(bar.style.width) || 0;
+    const steps = 30;
+    const step = (targetPct - cur) / steps;
+    let i = 0;
+    const iv = setInterval(() => {
+      cur += step;
+      bar.style.width = Math.min(cur, targetPct) + '%';
+      if (++i >= steps) clearInterval(iv);
+    }, durationMs / steps);
+  }
+
+  async function runPreview() {
+    clearError();
+    if (!files['rawFile']) { showError('Please upload the Raw File (Required).'); return; }
+
+    const btn = document.getElementById('btn-preview');
+    const spin = document.getElementById('spin-preview');
+    btn.disabled = true;
+    spin.style.display = 'block';
+    setStatus('Analyzing files...');
+    animateProgress(80, 2000);
+
+    try {
+      const resp = await fetch(`${API}/api/summary`, { method: 'POST', body: buildFormData() });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'Processing failed');
+      animateProgress(100, 300);
+      setStatus('');
+      if (data.prevWorkingWarning) {
+        const w = document.getElementById('wrong-file-warning');
+        document.getElementById('wrong-file-text').textContent = data.prevWorkingWarning;
+        w.style.display = 'flex';
+        document.getElementById('results').style.display = 'none';
+        document.getElementById('btn-download').style.display = 'none';
+      } else {
+        document.getElementById('wrong-file-warning').style.display = 'none';
+        renderResults(data);
+        document.getElementById('btn-download').style.display = 'inline-flex';
+      }
+    } catch(e) {
+      showError(e.message);
+      setStatus('');
+      document.getElementById('progress-wrap').style.display = 'none';
+    } finally {
+      btn.disabled = false;
+      spin.style.display = 'none';
+    }
+  }
+
+  async function runDownload() {
+    clearError();
+    if (!files['rawFile']) { showError('Please upload the Raw File (Required).'); return; }
+
+    const btn = document.getElementById('btn-download');
+    const spin = document.getElementById('spin-dl');
+    btn.disabled = true;
+    spin.style.display = 'block';
+    setStatus('Generating Working Copy Excel file...');
+    animateProgress(90, 3000);
+
+    try {
+      const resp = await fetch(`${API}/api/process`, { method: 'POST', body: buildFormData() });
+      if (!resp.ok) {
+        const data = await resp.json();
+        throw new Error(data.error || 'Processing failed');
+      }
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'Working_Copy_Processed.xlsx';
+      a.click();
+      URL.revokeObjectURL(url);
+      animateProgress(100, 200);
+      setStatus('File downloaded successfully.');
+    } catch(e) {
+      showError(e.message);
+      setStatus('');
+    } finally {
+      btn.disabled = false;
+      spin.style.display = 'none';
+    }
+  }
+
+  function fmt(n) { return (n||0).toLocaleString(); }
+  function fmtAmt(n) {
+    const abs = Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    return n < 0 ? `(${abs})` : abs;
+  }
+
+  function renderResults(data) {
+    const { summary, unidentifiedList, billingSummary } = data;
+    document.getElementById('results').style.display = 'block';
+
+    const totalUnid = (summary.unidentifiedCLEC || 0) + (summary.unidentifiedSOC || 0) + (summary.unidentifiedPlanRate || 0);
+
+    // Stat cards
+    document.getElementById('stat-grid').innerHTML = `
+      <div class="stat-card blue"><div class="value">${fmt(summary.total)}</div><div class="label">Total Rows</div></div>
+      <div class="stat-card green"><div class="value">${fmt(summary.identified)}</div><div class="label">Identified</div></div>
+      <div class="stat-card red"><div class="value">${fmt(summary.unidentifiedCLEC||0)}</div><div class="label">Unidentified CLEC</div></div>
+      <div class="stat-card red"><div class="value">${fmt(summary.unidentifiedSOC||0)}</div><div class="label">Unidentified SOC</div></div>
+      <div class="stat-card red"><div class="value">${fmt(summary.unidentifiedPlanRate||0)}</div><div class="label">Unidentified Plan Rate</div></div>
+      <div class="stat-card orange"><div class="value">${fmt(summary.mdnsWithUsage||0)}</div><div class="label">MDNs with Usage</div></div>
+      <div class="stat-card blue"><div class="value">${fmt(summary.byCategory.NRT)}</div><div class="label">NRT Rows</div></div>
+      <div class="stat-card blue"><div class="value">${fmt(summary.byCategory.COG)}</div><div class="label">COG (Usage)</div></div>
+      <div class="stat-card green"><div class="value">${fmt(summary.nalOverrides||0)}</div><div class="label">NAL Overrides</div></div>
+    `;
+
+    // Alert
+    const alertEl = document.getElementById('alert-unidentified');
+    if (totalUnid > 0) {
+      alertEl.innerHTML = `<div class="alert alert-warning"><span>⚠️</span><span>There are unidentified fields — see breakdown below. Send the MDN list to Gopal or Camilo.</span></div>`;
+    } else {
+      alertEl.innerHTML = `<div class="alert alert-success"><span>✅</span><span>All MDNs fully identified — no action needed from Gopal/Camilo.</span></div>`;
+    }
+
+    // Unidentified breakdown card
+    const unidCard = document.getElementById('unid-breakdown-card');
+    if (totalUnid > 0) {
+      unidCard.style.display = 'block';
+      document.getElementById('unid-breakdown-tbody').innerHTML = [
+        { label: 'Unidentified CLEC',      val: summary.unidentifiedCLEC     || 0 },
+        { label: 'Unidentified SOC Code',  val: summary.unidentifiedSOC      || 0 },
+        { label: 'Unidentified Plan Rate', val: summary.unidentifiedPlanRate  || 0 },
+      ].map(r => `<tr><td>${r.label}</td><td class="count" style="color:${r.val>0?'#e53e3e':'#38a169'}">${fmt(r.val)}</td></tr>`).join('');
+
+      document.getElementById('unid-tbody').innerHTML = (unidentifiedList || []).map(u => {
+        const tags = u.missing.map(m => {
+          const cls = m === 'CLEC' ? 'tag-clec' : m === 'SOC Code' ? 'tag-soc' : 'tag-plan';
+          return `<span class="tag ${cls}">${m}</span>`;
+        }).join('');
+        return `<tr><td><code>${u.mdn}</code></td><td>${u.name||'—'}</td><td>${tags}</td></tr>`;
+      }).join('');
+    } else {
+      unidCard.style.display = 'none';
+    }
+
+    // Billing Summary table
+    const remarksColor = { 'MRC': '#2e75b6', 'Optimized': '#276749', 'Month In Advance': '#6b46c1', 'Month In Advance - Credit': '#975a16', 'Credit': '#c53030' };
+    const bs = billingSummary || [];
+    const totalAmt = parseFloat(bs.reduce((s, e) => s + e.amount, 0).toFixed(2));
+    const rows = bs.map(e => {
+      const color = remarksColor[e.remarks] || '#2d3748';
+      return `<tr>
+        <td>${e.description}</td>
+        <td style="font-family:monospace;font-size:12px">${e.period}</td>
+        <td class="count">${e.mdnCount ? fmt(e.mdnCount) : ''}</td>
+        <td class="count">${fmtAmt(e.amount)}</td>
+        <td><span style="color:${color};font-weight:700;font-size:12px">${e.remarks}</span></td>
+      </tr>`;
+    });
+    if (bs.length) {
+      rows.push(`<tr style="border-top:2px solid #1F4E79;font-weight:700;background:#edf2f7">
+        <td colspan="3" style="text-align:right;padding-right:12px;color:#1F4E79">TOTAL</td>
+        <td class="count" style="color:#1F4E79">${fmtAmt(totalAmt)}</td>
+        <td></td>
+      </tr>`);
+    }
+    document.getElementById('billing-tbody').innerHTML = rows.join('') || '<tr><td colspan="5" style="text-align:center;color:#a0aec0">No billing data</td></tr>';
+
+    // CLEC table
+    const clecRows = Object.entries(summary.byClec).sort((a,b) => b[1]-a[1]);
+    document.getElementById('clec-tbody').innerHTML = clecRows.map(([k,v]) =>
+      `<tr><td>${k || '—'}</td><td class="count">${v.toLocaleString()}</td></tr>`
+    ).join('') || '<tr><td colspan="2" style="color:#a0aec0;text-align:center">No data</td></tr>';
+
+    // Plan table
+    const planRows = Object.entries(summary.byPlan).sort((a,b) => b[1]-a[1]);
+    document.getElementById('plan-tbody').innerHTML = planRows.map(([k,v]) =>
+      `<tr><td>${k || '—'}</td><td class="count">${v.toLocaleString()}</td></tr>`
+    ).join('') || '<tr><td colspan="2" style="color:#a0aec0;text-align:center">No data</td></tr>';
+
+    // Unidentified list
+    if (unidentifiedList && unidentifiedList.length > 0) {
+      document.getElementById('unid-breakdown-card').style.display = 'block';
+      document.getElementById('unid-tbody').innerHTML = unidentifiedList.map(u => {
+        const tags = u.missing.map(m => {
+          const cls = m === 'CLEC' ? 'tag-clec' : m === 'SOC Code' ? 'tag-soc' : 'tag-plan';
+          return `<span class="tag ${cls}">${m}</span>`;
+        }).join('');
+        return `<tr><td><code>${u.mdn}</code></td><td>${u.name || '—'}</td><td>${tags}</td></tr>`;
+      }).join('');
+    } else {
+      document.getElementById('unid-breakdown-card').style.display = 'none';
+    }
+
+    document.getElementById('results').scrollIntoView({ behavior: 'smooth' });
+  }
+
+  // ===================== STEP 2 JS =====================
+  const s2files = {};
+
+  function s2OnFile(input, zoneId, fnId) {
+    const file = input.files[0];
+    if (!file) return;
+    s2files[input.id.replace('s2-', '')] = file;
+    document.getElementById(zoneId).classList.add('has-file');
+    document.getElementById(fnId).textContent = file.name;
+  }
+
+  function s2OnDrop(e, el, fieldName) {
+    e.preventDefault();
+    el.classList.remove('drag-over');
+    const file = e.dataTransfer.files[0];
+    if (!file) return;
+    s2files[fieldName] = file;
+    el.classList.add('has-file');
+    const inp = el.querySelector('input[type=file]');
+    const dt = new DataTransfer(); dt.items.add(file); inp.files = dt.files;
+    const fnId = el.id.replace('s2-zone-', 's2-fn-');
+    document.getElementById(fnId).textContent = file.name;
+  }
+
+  function s2BuildForm() {
+    const fd = new FormData();
+    if (s2files['processedWC'])    fd.append('processedWC',    s2files['processedWC']);
+    if (s2files['gopalFile'])      fd.append('gopalFile',      s2files['gopalFile']);
+    if (s2files['telzeqPrevFile']) fd.append('telzeqPrevFile', s2files['telzeqPrevFile']);
+    return fd;
+  }
+
+  const s2SpinIds = { finalized: 's2-spin-wc', telzeq: 's2-spin-telzeq', nal: 's2-spin-nal' };
+  const s2Endpoints = { finalized: '/api/step2/finalized', telzeq: '/api/step2/telzeq', nal: '/api/step2/nal' };
+  const s2Filenames = { finalized: 'Finalized_Working_Copy.xlsx', telzeq: 'Telzeq_Customer_File.xlsx', nal: 'NAL_Customer_File.xlsx' };
+
+  async function s2Download(type) {
+    document.getElementById('s2-error').style.display = 'none';
+    if (!s2files['processedWC']) {
+      document.getElementById('s2-error-text').textContent = 'Please upload the Processed Working Copy (Required).';
+      document.getElementById('s2-error').style.display = 'flex';
+      return;
+    }
+    const spin = document.getElementById(s2SpinIds[type]);
+    spin.style.display = 'block';
+    const statusEl = document.getElementById('s2-status');
+    statusEl.textContent = `Generating ${s2Filenames[type]}…`;
+    statusEl.style.display = 'block';
+    try {
+      const resp = await fetch(`${API}${s2Endpoints[type]}`, { method: 'POST', body: s2BuildForm() });
+      if (!resp.ok) {
+        const data = await resp.json().catch(() => ({}));
+        throw new Error(data.error || `Server error ${resp.status}`);
+      }
+      const blob = await resp.blob();
+      const url  = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = s2Filenames[type]; a.click();
+      URL.revokeObjectURL(url);
+      statusEl.textContent = `${s2Filenames[type]} downloaded.`;
+    } catch (err) {
+      document.getElementById('s2-error-text').textContent = err.message;
+      document.getElementById('s2-error').style.display = 'flex';
+      statusEl.style.display = 'none';
+    } finally {
+      spin.style.display = 'none';
+    }
+  }
+
+  function s2Reset() {
+    Object.keys(s2files).forEach(k => delete s2files[k]);
+    ['s2-zone-wc','s2-zone-gopal'].forEach(id => document.getElementById(id).classList.remove('has-file'));
+    ['s2-fn-wc','s2-fn-gopal'].forEach(id => document.getElementById(id).textContent = '');
+    document.querySelectorAll('#s2-zone-wc input, #s2-zone-gopal input').forEach(i => i.value = '');
+    document.getElementById('s2-status').style.display = 'none';
+    document.getElementById('s2-error').style.display = 'none';
+  }
+  // ======================================================
+
+  function resetAll() {
+    Object.keys(files).forEach(k => delete files[k]);
+    ['zone-raw','zone-prev','zone-nal'].forEach(id => {
+      document.getElementById(id).classList.remove('has-file');
+    });
+    ['fn-raw','fn-prev','fn-nal'].forEach(id => {
+      document.getElementById(id).textContent = '';
+    });
+    document.querySelectorAll('input[type=file]').forEach(i => i.value = '');
+    document.getElementById('results').style.display = 'none';
+    document.getElementById('btn-download').style.display = 'none';
+    document.getElementById('progress-wrap').style.display = 'none';
+    document.getElementById('progress-bar').style.width = '0';
+    document.getElementById('unid-breakdown-card').style.display = 'none';
+    clearError();
+    setStatus('');
+    document.getElementById('wrong-file-warning').style.display = 'none';
+  }
+</script>
+</body>
+</html>
