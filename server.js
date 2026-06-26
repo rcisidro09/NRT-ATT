@@ -106,12 +106,171 @@ function classifyPeriod(dateStart, dateEnd, sortedStandardPeriods) {
   return 'prior';
 }
 
+// ── Flag helpers ──────────────────────────────────────────────────────────────
+
+function isUsageRow(row) {
+  return String(row['Billing Category'] || '').trim() === 'COG';
+}
+
+function isCreditRow(row) {
+  return parseFloat(row['Amount']) < 0 || /^Credit/i.test(String(row['Description'] || ''));
+}
+
+function periodsOverlap(startA, endA, startB, endB) {
+  if (!startA || !endA || !startB || !endB) return false;
+  const sA = parseDate(startA), eA = parseDate(endA);
+  const sB = parseDate(startB), eB = parseDate(endB);
+  if (!sA || !eA || !sB || !eB || isNaN(sA) || isNaN(eA) || isNaN(sB) || isNaN(eB)) return false;
+  return sA <= eB && sB <= eA;
+}
+
+// Union-Find used by Flag 1 to identify connected overlapping-period groups
+function makeUF(n) {
+  const p = Array.from({ length: n }, (_, i) => i);
+  function find(i) { return p[i] === i ? i : (p[i] = find(p[i])); }
+  function union(i, j) { p[find(i)] = find(j); }
+  return { find, union };
+}
+
+function computeFlaggedItems(output, prevBilledRows) {
+  const flagged = [];
+
+  // ── Flag 1: Duplicate MRC Charge, Same/Overlapping Period ─────────────────
+  const byMDN = new Map();
+  for (let i = 0; i < output.length; i++) {
+    const mdn = String(output[i]['Number'] || '').trim();
+    if (!mdn) continue;
+    if (!byMDN.has(mdn)) byMDN.set(mdn, []);
+    byMDN.get(mdn).push(i);
+  }
+
+  for (const [mdn, indices] of byMDN) {
+    if (indices.length < 2) continue;
+    const n = indices.length;
+    const { find, union } = makeUF(n);
+
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const a = output[indices[i]], b = output[indices[j]];
+        if (periodsOverlap(a['Date Start'], a['Date End'], b['Date Start'], b['Date End'])) {
+          union(i, j);
+        }
+      }
+    }
+
+    // Collect components with ≥ 2 members
+    const components = new Map();
+    for (let i = 0; i < n; i++) {
+      const root = find(i);
+      if (!components.has(root)) components.set(root, []);
+      components.get(root).push(indices[i]);
+    }
+
+    for (const [, group] of components) {
+      if (group.length < 2) continue;
+      const rows = group.map(idx => output[idx]);
+      // Suppress if any row in the group is a Credit or Usage
+      if (rows.some(r => isUsageRow(r) || isCreditRow(r))) continue;
+
+      for (const r of rows) {
+        flagged.push({
+          'MDN':              mdn,
+          'Flag Type':        'Duplicate-SamePeriod',
+          'Period Start':     r['Date Start'],
+          'Period End':       r['Date End'],
+          'Prior Period Start': '',
+          'Prior Period End':   '',
+          'Description':      r['Description'],
+          'Amount':           parseFloat(r['Amount']) || 0,
+          'Prior Amount':     '',
+          'Row Count in Group': group.length,
+          'Flag Reason':      'Duplicate MRC charge — same/overlapping period, no credit/usage offset',
+          'Status':           '',
+        });
+      }
+    }
+  }
+
+  // ── Flag 2: High Billable Usage (> 10 GB) ─────────────────────────────────
+  for (const row of output) {
+    if (!isUsageRow(row)) continue;
+    const gb = parseGBUsage(row['Usage GB']);
+    if (gb <= 10) continue;
+    flagged.push({
+      'MDN':              String(row['Number'] || '').trim(),
+      'Flag Type':        'HighUsage',
+      'Period Start':     row['Date Start'],
+      'Period End':       row['Date End'],
+      'Prior Period Start': '',
+      'Prior Period End':   '',
+      'Description':      row['Description'],
+      'Amount':           parseFloat(row['Amount']) || 0,
+      'Prior Amount':     '',
+      'Row Count in Group': '',
+      'Flag Reason':      `High billable usage — ${gb.toFixed(4)} GB exceeds 10 GB threshold`,
+      'Status':           '',
+    });
+  }
+
+  // ── Flag 3: Already Billed in Prior Month ─────────────────────────────────
+  if (prevBilledRows && prevBilledRows.length > 0) {
+    const priorByMDN = new Map();
+    for (const pr of prevBilledRows) {
+      if (!pr.mdn) continue;
+      if (!priorByMDN.has(pr.mdn)) priorByMDN.set(pr.mdn, []);
+      priorByMDN.get(pr.mdn).push(pr);
+    }
+
+    for (const row of output) {
+      const mdn = String(row['Number'] || '').trim();
+      if (!mdn) continue;
+      if (isUsageRow(row) || isCreditRow(row)) continue; // current row suppresses itself
+
+      const priorRows = priorByMDN.get(mdn);
+      if (!priorRows) continue;
+
+      for (const pr of priorRows) {
+        if (pr.isCredit || pr.isUsage) continue; // prior row suppresses itself
+        if (!periodsOverlap(row['Date Start'], row['Date End'], pr.dateStart, pr.dateEnd)) continue;
+
+        flagged.push({
+          'MDN':              mdn,
+          'Flag Type':        'Duplicate-PriorMonth',
+          'Period Start':     row['Date Start'],
+          'Period End':       row['Date End'],
+          'Prior Period Start': pr.dateStart,
+          'Prior Period End':   pr.dateEnd,
+          'Description':      row['Description'],
+          'Amount':           parseFloat(row['Amount']) || 0,
+          'Prior Amount':     pr.amount,
+          'Row Count in Group': '',
+          'Flag Reason':      'MDN already billed in overlapping period in prior month\'s working copy',
+          'Status':           '',
+        });
+        break; // one flag per current row is sufficient
+      }
+    }
+  }
+
+  // Sort by MDN, then Flag Type
+  flagged.sort((a, b) =>
+    a['MDN'] !== b['MDN']
+      ? String(a['MDN']).localeCompare(String(b['MDN']))
+      : a['Flag Type'].localeCompare(b['Flag Type'])
+  );
+
+  return flagged;
+}
+
+// ── End flag helpers ──────────────────────────────────────────────────────────
+
 function processFiles(rawFilePath, prevWorkingPath, nalMasterlistPath) {
   const rawWb = XLSX.readFile(rawFilePath);
   const rawData = XLSX.utils.sheet_to_json(rawWb.Sheets[rawWb.SheetNames[0]], { defval: '' });
 
   // --- Previous Working Copy lookup ---
   const prevLookup = new Map();
+  const prevBilledRows = []; // for Flag 3
   let prevWorkingWarning = null;
   if (prevWorkingPath) {
     const prevWb = XLSX.readFile(prevWorkingPath);
@@ -125,11 +284,25 @@ function processFiles(rawFilePath, prevWorkingPath, nalMasterlistPath) {
     }
     for (const row of prevData) {
       const mdn = String(row['Number'] || '').trim();
-      if (!mdn || prevLookup.has(mdn)) continue;
-      prevLookup.set(mdn, {
-        clec:     getCol(row, 'clec name', 'clec'),
-        soc:      getCol(row, 'soc-code nrt plan if na consult support', 'soc code', 'soc'),
-        planRate: getCol(row, 'plan rate customer rate', 'plan rate'),
+      if (!mdn) continue;
+      if (!prevLookup.has(mdn)) {
+        prevLookup.set(mdn, {
+          clec:     getCol(row, 'clec name', 'clec'),
+          soc:      getCol(row, 'soc-code nrt plan if na consult support', 'soc code', 'soc'),
+          planRate: getCol(row, 'plan rate customer rate', 'plan rate'),
+        });
+      }
+      // Collect all rows (including duplicates) for Flag 3 overlap check
+      const amt = parseFloat(row['Amount']) || 0;
+      const desc = String(row['Description'] || '').trim();
+      const billingCat = String(row['Billing Category'] || '').trim();
+      prevBilledRows.push({
+        mdn,
+        dateStart: String(row['Date Start'] || '').trim(),
+        dateEnd:   String(row['Date End']   || '').trim(),
+        amount:    amt,
+        isCredit:  amt < 0 || /^Credit/i.test(desc),
+        isUsage:   billingCat === 'COG',
       });
     }
     console.log(`prevLookup: ${prevLookup.size} unique MDNs`);
@@ -320,10 +493,10 @@ function processFiles(rawFilePath, prevWorkingPath, nalMasterlistPath) {
       return a.description.localeCompare(b.description);
     });
 
-  return { output, summary, unidentifiedList: [...unidentifiedMap.values()], billingSummary, prevWorkingWarning };
+  return { output, summary, unidentifiedList: [...unidentifiedMap.values()], billingSummary, prevWorkingWarning, prevBilledRows };
 }
 
-function buildWorkbook(output, summary, unidentifiedList, billingSummary) {
+function buildWorkbook(output, summary, unidentifiedList, billingSummary, prevBilledRows) {
   const wb = XLSX.utils.book_new();
 
   // --- Working Copy sheet ---
@@ -396,6 +569,82 @@ function buildWorkbook(output, summary, unidentifiedList, billingSummary) {
     XLSX.utils.book_append_sheet(wb, wsU, 'Unidentified MDNs');
   }
 
+  // --- Flagged Items sheet ---
+  {
+    const flaggedItems = computeFlaggedItems(output, prevBilledRows || []);
+
+    const FLAG_COLS = [
+      'MDN', 'Flag Type', 'Period Start', 'Period End',
+      'Prior Period Start', 'Prior Period End',
+      'Description', 'Amount', 'Prior Amount', 'Row Count in Group',
+      'Flag Reason', 'Status',
+    ];
+
+    // aoa_to_sheet guarantees every cell exists — no missing-cell style-drop issues
+    const aoa = [FLAG_COLS];
+    if (flaggedItems.length > 0) {
+      for (const item of flaggedItems) {
+        aoa.push(FLAG_COLS.map(k => item[k] === undefined || item[k] === '' ? '' : item[k]));
+      }
+    } else {
+      aoa.push(['', '', '', '', '', '', '', '', '', '', 'No flagged items found', '']);
+    }
+
+    const wsF = XLSX.utils.aoa_to_sheet(aoa);
+
+    const fHeaderStyle = {
+      font: { bold: true, color: { rgb: 'FFFFFF' }, name: 'Arial', sz: 10 },
+      fill: { fgColor: { rgb: '7B2C2C' } },
+      alignment: { horizontal: 'center', vertical: 'center', wrapText: true },
+    };
+    // Row-background colours keyed by Flag Type value (column index 1)
+    const FLAG_COLOURS = {
+      'Duplicate-SamePeriod': 'FFF2CC', // yellow
+      'HighUsage':            'FCE4D6', // orange
+      'Duplicate-PriorMonth': 'DDEBF7', // blue
+    };
+    const numCols = FLAG_COLS.length;
+    const numRows = aoa.length;
+
+    for (let C = 0; C < numCols; C++) {
+      const addr = XLSX.utils.encode_cell({ r: 0, c: C });
+      if (!wsF[addr]) wsF[addr] = { v: FLAG_COLS[C], t: 's' };
+      wsF[addr].s = fHeaderStyle;
+    }
+
+    for (let R = 1; R < numRows; R++) {
+      const flagTypeCell = wsF[XLSX.utils.encode_cell({ r: R, c: 1 })];
+      const flagType = flagTypeCell ? String(flagTypeCell.v || '') : '';
+      const bgRgb = FLAG_COLOURS[flagType] || null;
+      const rowStyle = bgRgb
+        ? { fill: { fgColor: { rgb: bgRgb } }, font: { name: 'Arial', sz: 10 } }
+        : { font: { name: 'Arial', sz: 10 } };
+
+      for (let C = 0; C < numCols; C++) {
+        const addr = XLSX.utils.encode_cell({ r: R, c: C });
+        if (!wsF[addr]) wsF[addr] = { v: '', t: 's' };
+        wsF[addr].s = rowStyle;
+      }
+    }
+
+    wsF['!ref'] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: numRows - 1, c: numCols - 1 } });
+    wsF['!cols'] = [
+      { wch: 14 }, // MDN
+      { wch: 22 }, // Flag Type
+      { wch: 13 }, // Period Start
+      { wch: 13 }, // Period End
+      { wch: 18 }, // Prior Period Start
+      { wch: 18 }, // Prior Period End
+      { wch: 40 }, // Description
+      { wch: 12 }, // Amount
+      { wch: 12 }, // Prior Amount
+      { wch: 8  }, // Row Count in Group
+      { wch: 62 }, // Flag Reason
+      { wch: 18 }, // Status
+    ];
+    XLSX.utils.book_append_sheet(wb, wsF, 'Flagged Items');
+  }
+
   // --- Summary sheet ---
   const totalUnid = new Set([
     ...Array(summary.unidentifiedCLEC).fill(0).map((_,i)=>'c'+i),
@@ -466,9 +715,9 @@ app.post('/api/process', uploadFields, (req, res) => {
   const nalFile     = req.files['nalMasterlist']?.[0];
   if (!rawFile) return res.status(400).json({ error: 'Raw file is required.' });
   try {
-    const { output, summary, unidentifiedList, billingSummary } =
+    const { output, summary, unidentifiedList, billingSummary, prevBilledRows } =
       processFiles(rawFile.path, prevWorking?.path, nalFile?.path);
-    const wbOut = buildWorkbook(output, summary, unidentifiedList, billingSummary);
+    const wbOut = buildWorkbook(output, summary, unidentifiedList, billingSummary, prevBilledRows);
     const outPath = path.join('uploads', `working_copy_${Date.now()}.xlsx`);
     XLSX.writeFile(wbOut, outPath, { bookType: 'xlsx', type: 'binary', cellStyles: true });
     cleanupFiles(rawFile, prevWorking, nalFile);
@@ -1064,6 +1313,349 @@ app.post('/api/step2/nal', step2Upload, (req, res) => {
   } catch (err) {
     console.error(err);
     cleanupFiles(processedWC, gopalFile);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================
+// TAB 2 — NRT 499Q/A GL REVENUE REPORT PROCESSOR
+// ============================================================
+
+function normalizeGLCustomer(name) {
+  const n = String(name || '').toLowerCase();
+  if (n.includes('north american local')) return 'NAL';
+  if (n.includes('telzeq')) return 'Telzeq';
+  if (n.includes('metro communications')) return 'Metro';
+  return String(name || '').trim();
+}
+
+function getOveragePlan(desc) {
+  const d = String(desc || '').toLowerCase();
+  if (d.includes('hcd') || d.includes('home connect')) return 'Home Connect Device Plan';
+  if (/10\s*gb/.test(d)) return '10GB Voice and Data';
+  if (/5\s*gb/.test(d)) return '5GB Voice and Data';
+  return '1GB Voice and Data';
+}
+
+function parseGLFile(glFilePath) {
+  const wb = XLSX.readFile(glFilePath);
+  const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: '' });
+
+  const period = String(rows[2]?.[0] || '').trim();
+
+  // att[planKey][customer] = amount  (overage already distributed into plan)
+  const att = {};
+  // nonAtt[categoryLabel] = { [customer]: amount }
+  const nonAtt = {};
+
+  const MAIN_WITH_SUBS = new Set(['AT&T', 'Billable Contracts Hour', 'T -MOBILE']);
+  const SKIP_PREFIXES = ['National Relief', 'Transaction Report', 'Cash Basis', 'TOTAL', 'Total for'];
+  const DATE_RE = /^\d{2}\/\d{2}\/\d{4}$/;
+
+  let mainCat = null;
+  let subCat = null;
+  let inSub = false;
+
+  for (const row of rows) {
+    const c0 = String(row[0] || '').trim();
+    const c1 = String(row[1] || '').trim();
+    const amt = typeof row[8] === 'number' ? row[8] : 0;
+    const name = String(row[4] || '').trim();
+    const desc = String(row[5] || '').trim();
+
+    if (!c0 && !c1) continue;
+
+    if (c0.startsWith('Total for') && c0.includes('with sub-accounts')) {
+      mainCat = null; subCat = null; inSub = false;
+      continue;
+    }
+    if (c0.startsWith('Total for') || c0 === 'TOTAL') { subCat = null; continue; }
+    if (SKIP_PREFIXES.some(p => c0.startsWith(p))) continue;
+    if (c0 === '') {
+      // Possible transaction row
+      if (DATE_RE.test(c1) && amt !== 0) {
+        // Fall back to Num field (col 3) when Name (col 4) is empty — handles bad-debt Journal Entries
+        const nameOrNum = name || String(row[3] || '').trim();
+        const cust = normalizeGLCustomer(nameOrNum);
+        if (mainCat === 'AT&T' && subCat) {
+          let planKey = subCat === 'AT&T Overage' ? getOveragePlan(desc) : subCat;
+          if (!att[planKey]) att[planKey] = {};
+          att[planKey][cust] = (att[planKey][cust] || 0) + amt;
+        } else if (mainCat && mainCat !== 'AT&T') {
+          const key = subCat ? `${mainCat} — ${subCat}` : mainCat;
+          if (!nonAtt[key]) nonAtt[key] = {};
+          nonAtt[key][cust] = (nonAtt[key][cust] || 0) + amt;
+        }
+      }
+      continue;
+    }
+
+    // Category header (c0 non-empty, not total/skip)
+    if (MAIN_WITH_SUBS.has(c0)) {
+      mainCat = c0; subCat = null; inSub = true;
+    } else if (inSub) {
+      subCat = c0;
+    } else {
+      mainCat = c0; subCat = null; inSub = false;
+    }
+  }
+
+  return { period, att, nonAtt };
+}
+
+function sumCustomers(obj) {
+  return Object.values(obj || {}).reduce((s, v) => s + v, 0);
+}
+function round2(n) { return Math.round((n || 0) * 100) / 100; }
+
+function buildGLWorkbook(period, att, nonAtt) {
+  const wb = XLSX.utils.book_new();
+
+  // ── Dynamically discover customers from GL data ──
+  const PREFERRED_CUSTOMERS = ['NAL', 'Telzeq', 'Metro'];
+  const STATE_MAP = { NAL: 'Florida', Telzeq: 'New York', Metro: 'Georgia' };
+  const CUSTOMER_DISPLAY = { NAL: 'North American Local' };
+  const stateLabel = (c) => STATE_MAP[c] || c;
+  const custDisplay = (c) => CUSTOMER_DISPLAY[c] || c;
+
+  const customerSet = new Set();
+  for (const planData of Object.values(att)) {
+    for (const c of Object.keys(planData)) customerSet.add(c);
+  }
+  const customers = [
+    ...PREFERRED_CUSTOMERS.filter(c => customerSet.has(c)),
+    ...[...customerSet].filter(c => !PREFERRED_CUSTOMERS.includes(c)).sort(),
+  ];
+
+  // ── Dynamically discover AT&T plans from GL data ──
+  const PREFERRED_PLANS = [
+    '10GB Voice and Data', '1GB Voice and Data', '5GB Voice and Data',
+    'Home Connect Device Plan', '50MB Small Data Plan', 'Feature Phone',
+    'AT&T MRC Credit Sale', 'AT&T Passthrough Fees',
+  ];
+  const PLAN_LABEL = { 'AT&T Passthrough Fees': 'AT&T Passthrough' };
+  const leftPlans = [
+    ...PREFERRED_PLANS.filter(p => att[p]),
+    ...Object.keys(att).filter(p => !PREFERRED_PLANS.includes(p)).sort(),
+  ];
+
+  // Plan type classification — right-side table columns
+  // Any plan not in this map is treated as Voice and Data automatically
+  const PLAN_TYPE_MAP = {
+    'Home Connect Device Plan': 'hcd',
+    'Feature Phone': 'fp',
+    'AT&T Passthrough Fees': 'pt',
+    'AT&T MRC Credit Sale': 'mrc',
+  };
+  const planType = (p) => PLAN_TYPE_MAP[p] || 'vd';
+
+  const planAmt = (plan, cust) => round2((att[plan] || {})[cust] || 0);
+
+  // ── Per-customer aggregates ──
+  const stateAgg = {};
+  for (const c of customers) {
+    const agg = { vd: 0, fp: 0, hcd: 0, pt: 0, mrc: 0 };
+    for (const plan of leftPlans) {
+      const t = planType(plan);
+      agg[t] = round2(agg[t] + planAmt(plan, c));
+    }
+    agg.total = round2(agg.vd + agg.fp + agg.hcd + agg.pt + agg.mrc);
+    stateAgg[c] = agg;
+  }
+
+  // Zero-out customers whose net total rounds to 0
+  const zeroedCustomers = new Set(customers.filter(c => Math.abs(stateAgg[c].total) < 0.01));
+  for (const c of zeroedCustomers) {
+    stateAgg[c] = { vd: 0, fp: 0, hcd: 0, pt: 0, mrc: 0, total: 0 };
+  }
+
+  const attGrandTotal = round2(customers.reduce((s, c) => s + stateAgg[c].total, 0));
+
+  // ── Column layout (dynamic based on number of customers) ──
+  const N = customers.length;
+  const colTotal  = N + 1;
+  const colState  = N + 3;
+  const colVD     = N + 4;
+  const colFP     = N + 5;
+  const colHCD    = N + 6;
+  const colPT     = N + 7;
+  const colMRC    = N + 8;
+  const colRTotal = N + 9;
+
+  // ── Cell styles ──
+  const blueHeader = { font: { bold: true, color: { rgb: 'FFFFFF' }, name: 'Arial', sz: 10 }, fill: { fgColor: { rgb: '1F4E79' } }, alignment: { horizontal: 'center' } };
+  const boldBlue   = { font: { bold: true, color: { rgb: '1F4E79' }, name: 'Arial', sz: 10 } };
+  const boldBlack  = { font: { bold: true, name: 'Arial', sz: 10 } };
+  const normal     = { font: { name: 'Arial', sz: 10 } };
+  const numFmt     = '$#,##0.00;($#,##0.00);"-"';
+
+  function setCell(ws, r, c, v, s, z) {
+    const addr = XLSX.utils.encode_cell({ r, c });
+    ws[addr] = { v, t: typeof v === 'number' ? 'n' : 's' };
+    if (s) ws[addr].s = s;
+    if (z) ws[addr].z = z;
+  }
+
+  // ── AT&T Sheet ──
+  const attWS = XLSX.utils.aoa_to_sheet([]);
+
+  setCell(attWS, 0, 0, 'National Relief Telecom', boldBlue);
+  setCell(attWS, 1, 0, period, normal);
+
+  // Row 3: headers
+  setCell(attWS, 3, 0, '', blueHeader);
+  customers.forEach((c, i) => setCell(attWS, 3, 1 + i, custDisplay(c), blueHeader));
+  setCell(attWS, 3, colTotal,  'Total',               blueHeader);
+  setCell(attWS, 3, colState,  '',                    blueHeader);
+  setCell(attWS, 3, colVD,     'Voice and Data',      blueHeader);
+  setCell(attWS, 3, colFP,     'Feature Phone',       blueHeader);
+  setCell(attWS, 3, colHCD,    'HCD Plan',            blueHeader);
+  setCell(attWS, 3, colPT,     'AT&T Passthrough',    blueHeader);
+  setCell(attWS, 3, colMRC,    'AT&T MRC Credit Sale',blueHeader);
+  setCell(attWS, 3, colRTotal, 'Total',               blueHeader);
+
+  // Row 4: state sub-labels for left table columns + first customer's right-table row
+  const subLabelStyle = { font: { bold: true, name: 'Arial', sz: 10 }, alignment: { horizontal: 'center' } };
+  customers.forEach((c, i) => setCell(attWS, 4, 1 + i, stateLabel(c), subLabelStyle));
+
+  function writeRightRow(ws, r, c) {
+    const agg = stateAgg[c];
+    setCell(ws, r, colState, stateLabel(c), boldBlack);
+    if (agg.vd)  setCell(ws, r, colVD,    agg.vd,    normal, numFmt);
+    if (agg.fp)  setCell(ws, r, colFP,    agg.fp,    normal, numFmt);
+    if (agg.hcd) setCell(ws, r, colHCD,   agg.hcd,   normal, numFmt);
+    if (agg.pt)  setCell(ws, r, colPT,    agg.pt,    normal, numFmt);
+    if (agg.mrc) setCell(ws, r, colMRC,   agg.mrc,   normal, numFmt);
+    setCell(ws, r, colRTotal, agg.total, boldBlack, numFmt);
+  }
+
+  if (customers[0]) writeRightRow(attWS, 4, customers[0]);
+
+  // Left table plan rows + right-side state rows
+  leftPlans.forEach((plan, i) => {
+    const r = 5 + i;
+    setCell(attWS, r, 0, PLAN_LABEL[plan] || plan, normal);
+
+    let rowTotal = 0;
+    customers.forEach((c, ci) => {
+      const zeroed = zeroedCustomers.has(c);
+      const amt = zeroed ? 0 : planAmt(plan, c);
+      // Show 0 explicitly for zeroed customers; skip cell for non-zeroed zeros
+      if (zeroed || amt) setCell(attWS, r, 1 + ci, amt, normal, numFmt);
+      if (!zeroed) rowTotal = round2(rowTotal + planAmt(plan, c));
+    });
+    if (rowTotal) setCell(attWS, r, colTotal, rowTotal, boldBlack, numFmt);
+
+    // Right-side: customers[1] goes on row 5 (i=0), customers[2] on row 6 (i=1), etc.
+    const stateIdx = i + 1;
+    if (stateIdx < customers.length) {
+      writeRightRow(attWS, r, customers[stateIdx]);
+    } else if (stateIdx === customers.length) {
+      // Place right-table grand total on the row right after the last state
+      setCell(attWS, r, colMRC,    'Total',        boldBlack);
+      setCell(attWS, r, colRTotal, attGrandTotal,  boldBlack, numFmt);
+    }
+  });
+
+  // Left table grand total row
+  const totalRow = 5 + leftPlans.length;
+  customers.forEach((c, ci) => {
+    const zeroed = zeroedCustomers.has(c);
+    const custTotal = zeroed ? 0 : round2(leftPlans.reduce((s, p) => s + planAmt(p, c), 0));
+    setCell(attWS, totalRow, 1 + ci, custTotal, boldBlack, numFmt);
+  });
+  setCell(attWS, totalRow, colTotal, attGrandTotal, boldBlack, numFmt);
+
+  const attCols = [{ wch: 28 }];
+  for (let i = 0; i < N; i++) attCols.push({ wch: i === 0 ? 16 : 10 });
+  attCols.push({ wch: 14 }, { wch: 3 }, { wch: 12 }, { wch: 16 }, { wch: 14 }, { wch: 12 }, { wch: 16 }, { wch: 18 }, { wch: 14 });
+  attWS['!cols'] = attCols;
+  attWS['!ref'] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: totalRow, c: colRTotal } });
+  XLSX.utils.book_append_sheet(wb, attWS, 'AT&T');
+
+  // ── Summary Sheet ──
+  const sumWS = XLSX.utils.aoa_to_sheet([]);
+  const sumHeaders = ['State','Voice and Data','Feature Phone','HCD Plan','Pass-Through','Telecom','Non-Telecom','Total'];
+  sumHeaders.forEach((h, c) => setCell(sumWS, 0, c, h, blueHeader));
+
+  let sumRow = 1;
+  let telecomTotal = 0;
+
+  for (const c of customers) {
+    if (!Object.values(att).some(v => c in v)) continue;
+    const agg = stateAgg[c];
+    // V&D in Summary = VD + MRC credit (netted in), per existing business logic
+    const vdNet = round2(agg.vd + agg.mrc);
+    const telecom = round2(vdNet + agg.fp + agg.hcd + agg.pt);
+    setCell(sumWS, sumRow, 0, stateLabel(c), boldBlack);
+    if (vdNet)   setCell(sumWS, sumRow, 1, vdNet,   normal, numFmt);
+    if (agg.fp)  setCell(sumWS, sumRow, 2, agg.fp,  normal, numFmt);
+    if (agg.hcd) setCell(sumWS, sumRow, 3, agg.hcd, normal, numFmt);
+    if (agg.pt)  setCell(sumWS, sumRow, 4, agg.pt,  normal, numFmt);
+    setCell(sumWS, sumRow, 5, telecom, normal, numFmt);
+    telecomTotal = round2(telecomTotal + telecom);
+    sumRow++;
+  }
+
+  // ── Dynamic non-telecom items ──
+  // Group sub-categories (e.g. "Billable Contracts Hour — Admin") by parent category
+  const DISPLAY_LABEL_MAP = { 'Billable Contracts Hour': 'Billable Contract Hours' };
+  const nonAttGrouped = {};
+  for (const [key, custData] of Object.entries(nonAtt)) {
+    const parent = key.split(' — ')[0].trim();
+    const label = DISPLAY_LABEL_MAP[parent] || parent;
+    nonAttGrouped[label] = round2((nonAttGrouped[label] || 0) + sumCustomers(custData));
+  }
+
+  // Preferred order for known items; unknown new items appended alphabetically
+  const PREFERRED_NON_TELECOM = [
+    'AT&T Sim Cards', 'Billable Contract Hours', 'Bookkeeping Revenue',
+    'Exclusive Brand – One-Time Development Fee', 'Lifeline Revenue',
+    'Marketing Revenue', 'Monthly Network Storage Fee',
+  ];
+  const nonTelecomKeys = [
+    ...PREFERRED_NON_TELECOM.filter(k => nonAttGrouped[k] && Math.abs(nonAttGrouped[k]) > 0.005),
+    ...Object.keys(nonAttGrouped).filter(k => !PREFERRED_NON_TELECOM.includes(k) && Math.abs(nonAttGrouped[k]) > 0.005).sort(),
+  ];
+
+  let nonTelecomTotal = 0;
+  for (const label of nonTelecomKeys) {
+    const amt = round2(nonAttGrouped[label]);
+    setCell(sumWS, sumRow, 0, label,  boldBlack);
+    setCell(sumWS, sumRow, 6, amt,    normal, numFmt);
+    nonTelecomTotal = round2(nonTelecomTotal + amt);
+    sumRow++;
+  }
+
+  const grandTotal = round2(telecomTotal + nonTelecomTotal);
+  setCell(sumWS, sumRow, 0, 'Total',          boldBlack);
+  setCell(sumWS, sumRow, 5, telecomTotal,     boldBlack, numFmt);
+  setCell(sumWS, sumRow, 6, nonTelecomTotal,  boldBlack, numFmt);
+  setCell(sumWS, sumRow, 7, grandTotal,       boldBlack, numFmt);
+
+  sumWS['!cols'] = [{ wch: 44 }, { wch: 16 }, { wch: 14 }, { wch: 12 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 14 }];
+  sumWS['!ref'] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: sumRow, c: 7 } });
+  XLSX.utils.book_append_sheet(wb, sumWS, 'Summary');
+
+  return wb;
+}
+
+const glUpload = upload.fields([{ name: 'glFile', maxCount: 1 }]);
+
+app.post('/api/499qa/process', glUpload, (req, res) => {
+  const glFile = req.files?.['glFile']?.[0];
+  if (!glFile) return res.status(400).json({ error: 'GL file is required.' });
+  try {
+    const { period, att, nonAtt } = parseGLFile(glFile.path);
+    const wb = buildGLWorkbook(period, att, nonAtt);
+    const outPath = path.join('uploads', `nrt_499qa_${Date.now()}.xlsx`);
+    XLSX.writeFile(wb, outPath, { bookType: 'xlsx', type: 'binary', cellStyles: true });
+    cleanupFiles(glFile);
+    const label = `NRT_Revenue_Report_${period.replace(/[^a-zA-Z0-9]/g,'_')}.xlsx`;
+    res.download(outPath, label, () => { if (fs.existsSync(outPath)) fs.unlinkSync(outPath); });
+  } catch (err) {
+    console.error(err);
+    cleanupFiles(glFile);
     res.status(500).json({ error: err.message });
   }
 });

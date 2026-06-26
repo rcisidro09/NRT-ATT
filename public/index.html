@@ -294,11 +294,41 @@
 <header>
   <div class="logo">AT</div>
   <div>
-    <h1>AT&T Billing Data Processor</h1>
-    <p>Automate your monthly billing working copy — CLEC lookup, SOC codes, plan rates, NAL overrides</p>
+    <h1>NRT Data Processor</h1>
+    <p>AT&T Billing Processor &amp; 499Q/A Revenue GL Report Generator</p>
   </div>
 </header>
 
+<!-- Tab Navigation -->
+<div style="background:#1F4E79;padding:0 32px;display:flex;gap:4px">
+  <button class="tab-btn active" id="tab-btn-1" onclick="switchTab(1)">
+    📋 NRT AT&amp;T Data Processing
+  </button>
+  <button class="tab-btn" id="tab-btn-2" onclick="switchTab(2)">
+    📊 NRT 499Q/A Data Processing
+  </button>
+</div>
+
+<style>
+  .tab-btn {
+    background: rgba(255,255,255,0.12);
+    color: rgba(255,255,255,0.8);
+    border: none;
+    padding: 10px 22px;
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+    border-radius: 6px 6px 0 0;
+    margin-top: 8px;
+    transition: all 0.2s;
+    letter-spacing: 0.2px;
+  }
+  .tab-btn:hover { background: rgba(255,255,255,0.2); color: white; }
+  .tab-btn.active { background: #f0f4f8; color: #1F4E79; }
+</style>
+
+<!-- Tab 1 content wrapper -->
+<div id="tab-1">
 <div class="container">
 
   <!-- Step 1: Upload Files -->
@@ -526,6 +556,111 @@
   </div>
 
 </div>
+</div><!-- end tab-1 -->
+
+<!-- ===================== TAB 2: NRT 499Q/A ===================== -->
+<div id="tab-2" style="display:none">
+<div class="container">
+
+  <div class="card">
+    <div class="section-title">About This Tool</div>
+    <p style="font-size:13px;color:#4a5568;line-height:1.6">
+      Upload the <strong>NRT Revenue General Ledger</strong> (QuickBooks Transaction Report) to automatically extract
+      revenue by customer and category, then download a formatted <strong>Summary &amp; AT&amp;T Breakdown</strong>
+      Excel file — ready for quarterly or annual 499Q/A reporting.
+    </p>
+  </div>
+
+  <div class="card">
+    <div class="section-title">Step 1 — Upload GL File</div>
+    <div style="display:grid;grid-template-columns:auto 1fr;gap:24px;align-items:start">
+
+      <!-- Upload zone -->
+      <div class="upload-zone" id="t2-zone-gl" style="width:260px"
+           ondragover="onDrag(event,this)" ondragleave="offDrag(this)"
+           ondrop="t2OnDrop(event,this)">
+        <input type="file" id="t2-glFile" accept=".xlsx,.xls"
+               onchange="t2OnFile(this)" />
+        <div class="upload-icon">📊</div>
+        <div class="label">Revenue GL File <span class="badge-required">Required</span></div>
+        <div class="sublabel">QuickBooks Transaction Report (XLSX)</div>
+        <div class="filename" id="t2-fn-gl"></div>
+      </div>
+
+      <!-- How-to instructions -->
+      <div style="background:#f7fafc;border:1px solid #e2e8f0;border-radius:10px;padding:16px 18px;font-size:13px;color:#2d3748;line-height:1.7">
+        <div style="font-weight:700;color:#1F4E79;margin-bottom:10px;font-size:13px;text-transform:uppercase;letter-spacing:0.6px">
+          📖 How to Export the GL File from QuickBooks Online
+        </div>
+        <ol style="margin:0;padding-left:18px;display:flex;flex-direction:column;gap:6px">
+          <li>Log in to <strong>QuickBooks Online (QBO)</strong>.</li>
+          <li>Go to <strong>Reports</strong> and open the <strong>Profit and Loss</strong> report.</li>
+          <li>Set the date range to the <strong>quarter or period</strong> you are working on.</li>
+          <li>Make sure the report is set to <strong>Cash Basis</strong>.</li>
+          <li>In the P&amp;L report, click the <strong>total amount for Revenue</strong> (above Cost of Goods Sold) — this opens the transaction detail.</li>
+          <li>Click <strong>Export</strong> (top-right of the transaction list) and save as <strong>Excel (.xlsx)</strong>.</li>
+          <li>Upload that file here.</li>
+        </ol>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="section-title">Step 2 — Generate Report</div>
+    <div class="actions">
+      <button class="btn btn-success" id="t2-btn-dl" onclick="t2Download()">
+        <span>&#8595; Download Summary &amp; Breakdown</span>
+        <div class="spinner" id="t2-spin"></div>
+      </button>
+      <button class="btn btn-secondary" onclick="t2Reset()" style="font-size:13px">Reset</button>
+    </div>
+    <div id="t2-status" style="font-size:13px;color:#4a5568;margin-top:10px;display:none"></div>
+    <div id="t2-error" class="alert alert-error" style="display:none;margin-top:14px">
+      <span>⚠️</span><span id="t2-error-text"></span>
+    </div>
+  </div>
+
+  <!-- Output preview -->
+  <div class="card" style="border-top:3px solid #276749">
+    <div class="section-title" style="margin-bottom:10px">Output File Structure</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;font-size:12px">
+      <div>
+        <div style="font-weight:700;color:#276749;margin-bottom:8px">📄 AT&amp;T Sheet</div>
+        <table class="breakdown-table">
+          <thead><tr><th>Plan</th><th>Florida (NAL)</th><th>NY (Telzeq)</th><th>GA (Metro)</th><th>Total</th></tr></thead>
+          <tbody>
+            <tr><td>10GB Voice and Data</td><td>—</td><td>✓</td><td>—</td><td>✓</td></tr>
+            <tr><td>1GB Voice and Data</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td></tr>
+            <tr><td>5GB Voice and Data</td><td>✓</td><td>✓</td><td>—</td><td>✓</td></tr>
+            <tr><td>HCD Plan</td><td>—</td><td>✓</td><td>—</td><td>✓</td></tr>
+            <tr><td>50MB Small Data</td><td>—</td><td>✓</td><td>—</td><td>✓</td></tr>
+            <tr><td>Feature Phone</td><td>—</td><td>✓</td><td>✓</td><td>✓</td></tr>
+            <tr><td>AT&amp;T MRC Credit Sale</td><td>✓</td><td>—</td><td>—</td><td>✓</td></tr>
+            <tr><td>AT&amp;T Passthrough</td><td>✓</td><td>—</td><td>✓</td><td>✓</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div>
+        <div style="font-weight:700;color:#1F4E79;margin-bottom:8px">📄 Summary Sheet</div>
+        <table class="breakdown-table">
+          <thead><tr><th>State</th><th>V&amp;D</th><th>FP</th><th>HCD</th><th>PT</th><th>Telecom</th></tr></thead>
+          <tbody>
+            <tr><td>Florida</td><td>✓</td><td>—</td><td>—</td><td>✓</td><td>✓</td></tr>
+            <tr><td>New York</td><td>✓</td><td>✓</td><td>✓</td><td>—</td><td>✓</td></tr>
+          </tbody>
+        </table>
+        <div style="margin-top:12px;color:#718096;line-height:1.6">
+          Plus non-telecom items:<br>
+          AT&amp;T Sim Cards · Billable Contract Hours · Bookkeeping Revenue ·
+          Exclusive Brand · Lifeline Revenue · Marketing Revenue · Monthly Network Storage
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+</div><!-- end tab-2 -->
 
 <script>
   const API = '';
@@ -853,6 +988,86 @@
     document.querySelectorAll('#s2-zone-wc input, #s2-zone-gopal input').forEach(i => i.value = '');
     document.getElementById('s2-status').style.display = 'none';
     document.getElementById('s2-error').style.display = 'none';
+  }
+  // ======================================================
+
+  // ===================== TAB SWITCHING =====================
+  function switchTab(n) {
+    document.getElementById('tab-1').style.display = n === 1 ? 'block' : 'none';
+    document.getElementById('tab-2').style.display = n === 2 ? 'block' : 'none';
+    document.getElementById('tab-btn-1').classList.toggle('active', n === 1);
+    document.getElementById('tab-btn-2').classList.toggle('active', n === 2);
+  }
+
+  // ===================== TAB 2 JS =====================
+  let t2glFile = null;
+
+  function t2OnFile(input) {
+    const file = input.files[0];
+    if (!file) return;
+    t2glFile = file;
+    document.getElementById('t2-zone-gl').classList.add('has-file');
+    document.getElementById('t2-fn-gl').textContent = file.name;
+  }
+
+  function t2OnDrop(e, el) {
+    e.preventDefault();
+    el.classList.remove('drag-over');
+    const file = e.dataTransfer.files[0];
+    if (!file) return;
+    t2glFile = file;
+    el.classList.add('has-file');
+    document.getElementById('t2-fn-gl').textContent = file.name;
+    const inp = el.querySelector('input[type=file]');
+    const dt = new DataTransfer(); dt.items.add(file); inp.files = dt.files;
+  }
+
+  async function t2Download() {
+    document.getElementById('t2-error').style.display = 'none';
+    if (!t2glFile) {
+      document.getElementById('t2-error-text').textContent = 'Please upload the Revenue GL file (Required).';
+      document.getElementById('t2-error').style.display = 'flex';
+      return;
+    }
+    const spin = document.getElementById('t2-spin');
+    const statusEl = document.getElementById('t2-status');
+    spin.style.display = 'block';
+    statusEl.textContent = 'Processing GL file…';
+    statusEl.style.display = 'block';
+    try {
+      const fd = new FormData();
+      fd.append('glFile', t2glFile);
+      const resp = await fetch(`${API}/api/499qa/process`, { method: 'POST', body: fd });
+      if (!resp.ok) {
+        const data = await resp.json().catch(() => ({}));
+        throw new Error(data.error || `Server error ${resp.status}`);
+      }
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const cd = resp.headers.get('content-disposition') || '';
+      const match = cd.match(/filename="?([^"]+)"?/);
+      a.download = match ? match[1] : 'NRT_Revenue_Report.xlsx';
+      a.click();
+      URL.revokeObjectURL(url);
+      statusEl.textContent = 'Report downloaded successfully.';
+    } catch (err) {
+      document.getElementById('t2-error-text').textContent = err.message;
+      document.getElementById('t2-error').style.display = 'flex';
+      statusEl.style.display = 'none';
+    } finally {
+      spin.style.display = 'none';
+    }
+  }
+
+  function t2Reset() {
+    t2glFile = null;
+    document.getElementById('t2-zone-gl').classList.remove('has-file');
+    document.getElementById('t2-fn-gl').textContent = '';
+    document.getElementById('t2-glFile').value = '';
+    document.getElementById('t2-status').style.display = 'none';
+    document.getElementById('t2-error').style.display = 'none';
   }
   // ======================================================
 
