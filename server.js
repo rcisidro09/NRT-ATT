@@ -1944,248 +1944,278 @@ function setRef(ws, maxR, maxC) {
 }
 
 // ── Build per-customer workbooks ──────────────────────────────
-function buildNALWorkbookTFN(c) {
+
+// Helper: apply header style to row 0 of a sheet
+function applyHdrRow(ws) {
+  const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
+  for (let C = range.s.c; C <= range.e.c; C++) {
+    const a = XLSX.utils.encode_cell({ r: 0, c: C });
+    if (ws[a]) ws[a].s = TFN_STYLE.hdr;
+  }
+}
+
+// Helper: build a CDR detail sheet (incalls / out calls / DID) with Amount ($) column
+function buildDetailSheet(headers, dataRows, amtColIdx, ratePerMin, totalLabel) {
+  const totalRow = new Array(headers.length).fill('');
+  totalRow[0] = totalLabel || 'TOTAL';
+  let sumAmt = 0;
+  const bodyRows = dataRows.map(vals => {
+    const row = [...vals];
+    const mins = parseFloat(row[amtColIdx]) || 0;
+    const amt  = r4(mins * (ratePerMin || 0));
+    sumAmt += amt;
+    row.push(amt);
+    return row;
+  });
+  sumAmt = r2(sumAmt);
+  const sumRow = new Array(headers.length + 1).fill('');
+  sumRow[0] = 'TOTAL';
+  sumRow[headers.length] = sumAmt;
+
+  const aoa = [[...headers, 'Amount ($)'], ...bodyRows, sumRow];
+  const ws  = XLSX.utils.aoa_to_sheet(aoa);
+  applyHdrRow(ws);
+
+  // Style body amount col and total row
+  const lastRow = aoa.length - 1;
+  const lastCol = headers.length;
+  for (let r = 1; r <= lastRow; r++) {
+    const a = XLSX.utils.encode_cell({ r, c: lastCol });
+    if (ws[a] && typeof ws[a].v === 'number') {
+      ws[a].s = r === lastRow ? TFN_STYLE.total : TFN_STYLE.norm;
+      ws[a].z = DOLLAR_FMT;
+    }
+  }
+  // Style total label
+  const tLabel = XLSX.utils.encode_cell({ r: lastRow, c: 0 });
+  if (ws[tLabel]) ws[tLabel].s = TFN_STYLE.total;
+
+  return ws;
+}
+
+function buildNALWorkbookTFN(c, rates) {
+  rates = rates || {};
   const wb = XLSX.utils.book_new();
 
   // Summary sheet
   {
     const ws = XLSX.utils.aoa_to_sheet([]);
-    const HDR = ['Item', 'terminationcarriername', 'TotalAnsweredDurationinMinutes', '', ''];
+    const HDR = ['Item', 'Service', 'Duration (min)', 'Amount ($)'];
+    const inSub  = r2(c.amtInbound + c.amtTFNFee);
+    const outSub = r2(c.amtLDInt + c.amtOutbound);
     const rows = [
       HDR,
-      ['NAL TFN', 'NorthAmericanLocal- Inbound', c.tfnMin, c.amtInbound, ''],
-      ['', 'TFN Numbers', c.tfnCount, c.amtTFNFee, ''],
-      ['', '', '', '', ''],
+      ['NAL TFN', 'NorthAmericanLocal- Inbound',  c.tfnMin,  c.amtInbound],
+      ['',        'TFN Numbers',                   c.tfnCount, c.amtTFNFee],
+      ['',        'Inbound Subtotal',               '',         inSub],
+      [],
       HDR,
-      ['NAL TFN', 'Long Distance Interstate', c.ldInt, c.amtLDInt, ''],
-      ['', 'NorthAmericanLocal- Outbound', c.outMin, c.amtOutbound, ''],
-      ['', '', '', '', ''],
-      ['', '', 'TOTAL', c.total, ''],
+      ['NAL TFN', 'Long Distance Interstate',       c.ldInt,   c.amtLDInt],
+      ['',        'NorthAmericanLocal- Outbound',   c.outMin,  c.amtOutbound],
+      ['',        'Outbound Subtotal',              '',         outSub],
+      [],
+      ['', '', 'TOTAL', c.total],
     ];
+    const hdrRows   = new Set([0, 5]);
+    const subRows   = new Set([3, 8]);
+    const totalRows = new Set([rows.length - 1]);
     rows.forEach((row, r) => row.forEach((v, col) => {
-      if (v === '') return;
-      const s = (r === 0 || r === 4) ? TFN_STYLE.hdr : (r === rows.length - 1 && col === 2) ? TFN_STYLE.bold : TFN_STYLE.norm;
+      if (v === '' || v == null) return;
+      let s = TFN_STYLE.norm;
+      if (hdrRows.has(r))             s = TFN_STYLE.hdr;
+      else if (subRows.has(r))        s = TFN_STYLE.total;
+      else if (totalRows.has(r) && col === 2) s = TFN_STYLE.bold;
       const z = (col === 3 && typeof v === 'number') ? DOLLAR_FMT : undefined;
       setC(ws, r, col, v, s, z);
     }));
-    setRef(ws, rows.length - 1, 4);
-    ws['!cols'] = [{wch:14},{wch:32},{wch:32},{wch:14},{wch:6}];
+    setRef(ws, rows.length - 1, 3);
+    ws['!cols'] = [{wch:14},{wch:34},{wch:18},{wch:14}];
     XLSX.utils.book_append_sheet(wb, ws, 'Summary');
   }
 
   // Incalls sheet
   {
-    const aoa = [
-      ['SourceNumber','TerminationNumber','calldatetime','Callduration_Minutes','','','Number','','','','',''],
-      ...c.inRows.map((r, i) => [
-        r.SourceNumber, r.TerminationNumber, r.calldatetime, r.Callduration_Minutes,
-        '','', i < c.tfnNumbers.length ? c.tfnNumbers[i] : '', '','','','',''
-      ]),
-    ];
-    const ws = XLSX.utils.aoa_to_sheet(aoa);
-    const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
-    for (let C = range.s.c; C <= range.e.c; C++) {
-      const a = XLSX.utils.encode_cell({ r: 0, c: C });
-      if (ws[a]) ws[a].s = TFN_STYLE.hdr;
-    }
-    ws['!cols'] = [{wch:14},{wch:14},{wch:22},{wch:20},{wch:4},{wch:4},{wch:14}];
+    const hdrs = ['SourceNumber','TerminationNumber','calldatetime','Callduration_Minutes','','','Number'];
+    const data  = c.inRows.map((row, i) => [
+      row.SourceNumber, row.TerminationNumber, row.calldatetime, row.Callduration_Minutes,
+      '', '', i < c.tfnNumbers.length ? c.tfnNumbers[i] : '',
+    ]);
+    const ws = buildDetailSheet(hdrs, data, 3, rates.inbound);
+    ws['!cols'] = [{wch:14},{wch:14},{wch:22},{wch:20},{wch:4},{wch:4},{wch:14},{wch:12}];
     XLSX.utils.book_append_sheet(wb, ws, ' Incalls');
   }
 
   // Out Calls sheet
   {
     const OCOLS = ['OriginationcarrierName','sourcenumber','terminationnumber','starttime','Duration_Minutes'];
-    const aoa = [OCOLS, ...c.outRows.map(r => OCOLS.map(k => r[k]))];
-    const ws = XLSX.utils.aoa_to_sheet(aoa);
-    const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
-    for (let C = range.s.c; C <= range.e.c; C++) {
-      const a = XLSX.utils.encode_cell({ r: 0, c: C });
-      if (ws[a]) ws[a].s = TFN_STYLE.hdr;
-    }
-    ws['!cols'] = [{wch:24},{wch:14},{wch:14},{wch:22},{wch:18}];
+    const data  = c.outRows.map(row => OCOLS.map(k => row[k]));
+    const ws = buildDetailSheet(OCOLS, data, 4, rates.ipcOutbound);
+    ws['!cols'] = [{wch:24},{wch:14},{wch:14},{wch:22},{wch:18},{wch:12}];
     XLSX.utils.book_append_sheet(wb, ws, 'Out Calls');
   }
 
   return wb;
 }
 
-function buildParicusWorkbookTFN(c) {
+function buildParicusWorkbookTFN(c, rates) {
+  rates = rates || {};
   const wb = XLSX.utils.book_new();
 
   // Summary
   {
-    const ws = XLSX.utils.aoa_to_sheet([]);
-    const HDR1 = ['Item','terminationcarriername','TotalAnsweredDurationinMinutes','',''];
-    const HDR2 = ['Item','OriginationcarrierName','TotalAnsweredDurationinMinutes','',''];
+    const ws  = XLSX.utils.aoa_to_sheet([]);
+    const HDR = ['Item', 'Service', 'Duration (min)', 'Amount ($)'];
+    const inSub  = r2(c.amtInbound + c.amtTFNFee);
+    const outSub = r2(c.amtLDInt + c.amtOutbound);
+    const didSub = r2(c.amtDIDMin + c.amtDIDFee);
     const rows = [
-      HDR1,
-      ['Paricus TFN','Paricus-Inbound', c.tfnMin, c.amtInbound, ''],
-      ['','TFN Numbers', c.tfnCount, c.amtTFNFee, ''],
-      ['','','','',''],
-      HDR2,
-      ['','Paricus Long Distance Interstate', c.ldInt, c.amtLDInt, ''],
-      ['','Paricus-Outbound', c.outMin, c.amtOutbound, ''],
-      ['','','','',''],
-      HDR2,
-      ['','DID Traffic', c.didMin, c.amtDIDMin, ''],
-      ['','DID Numbers', c.didCount, c.amtDIDFee, ''],
-      ['','','','',''],
-      ['','','TOTAL', c.total, ''],
+      HDR,
+      ['Paricus TFN', 'Paricus-Inbound',                  c.tfnMin,   c.amtInbound],
+      ['',            'TFN Numbers',                       c.tfnCount, c.amtTFNFee],
+      ['',            'Inbound Subtotal',                  '',          inSub],
+      [],
+      HDR,
+      ['',            'Paricus Long Distance Interstate',  c.ldInt,    c.amtLDInt],
+      ['',            'Paricus-Outbound',                  c.outMin,   c.amtOutbound],
+      ['',            'Outbound Subtotal',                 '',          outSub],
+      [],
+      HDR,
+      ['',            'DID Traffic',                       c.didMin,   c.amtDIDMin],
+      ['',            'DID Numbers',                       c.didCount, c.amtDIDFee],
+      ['',            'DID Subtotal',                      '',          didSub],
+      [],
+      ['', '', 'TOTAL', c.total],
     ];
+    const hdrRows = new Set([0, 5, 10]);
+    const subRows = new Set([3, 8, 13]);
+    const totalRow = rows.length - 1;
     rows.forEach((row, r) => row.forEach((v, col) => {
-      if (v === '') return;
-      const isHdr = r === 0 || r === 4 || r === 8;
-      const isTotal = r === rows.length - 1 && col === 2;
-      const s = isHdr ? TFN_STYLE.hdr : isTotal ? TFN_STYLE.bold : TFN_STYLE.norm;
+      if (v === '' || v == null) return;
+      let s = TFN_STYLE.norm;
+      if (hdrRows.has(r))                         s = TFN_STYLE.hdr;
+      else if (subRows.has(r))                    s = TFN_STYLE.total;
+      else if (r === totalRow && col === 2)       s = TFN_STYLE.bold;
       const z = (col === 3 && typeof v === 'number') ? DOLLAR_FMT : undefined;
       setC(ws, r, col, v, s, z);
     }));
-    setRef(ws, rows.length - 1, 4);
-    ws['!cols'] = [{wch:14},{wch:34},{wch:32},{wch:14},{wch:6}];
+    setRef(ws, rows.length - 1, 3);
+    ws['!cols'] = [{wch:14},{wch:36},{wch:18},{wch:14}];
     XLSX.utils.book_append_sheet(wb, ws, 'Summary');
   }
 
   // Paricus - Inbound Toll Free 382
   {
-    const aoa = [
-      ['SourceNumber','TerminationNumber','calldatetime','Callduration_Minutes','','','TFN Numbers','','','','','','','',''],
-      ...c.inRows.map((r, i) => [
-        r.SourceNumber, r.TerminationNumber, r.calldatetime, r.Callduration_Minutes,
-        '','', i < c.tfnNumbers.length ? c.tfnNumbers[i] : '',
-        '','','','','','','',''
-      ]),
-    ];
-    const ws = XLSX.utils.aoa_to_sheet(aoa);
-    const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
-    for (let C = range.s.c; C <= range.e.c; C++) {
-      const a = XLSX.utils.encode_cell({ r: 0, c: C });
-      if (ws[a]) ws[a].s = TFN_STYLE.hdr;
-    }
-    ws['!cols'] = [{wch:14},{wch:14},{wch:22},{wch:20},{wch:4},{wch:4},{wch:14}];
+    const hdrs = ['SourceNumber','TerminationNumber','calldatetime','Callduration_Minutes','','','TFN Numbers'];
+    const data  = c.inRows.map((row, i) => [
+      row.SourceNumber, row.TerminationNumber, row.calldatetime, row.Callduration_Minutes,
+      '', '', i < c.tfnNumbers.length ? c.tfnNumbers[i] : '',
+    ]);
+    const ws = buildDetailSheet(hdrs, data, 3, rates.inbound);
+    ws['!cols'] = [{wch:14},{wch:14},{wch:22},{wch:20},{wch:4},{wch:4},{wch:14},{wch:12}];
     XLSX.utils.book_append_sheet(wb, ws, 'Paricus - Inbound Toll Free 382');
   }
 
   // Paricus - Dial Out
   {
     const OCOLS = ['OriginationcarrierName','sourcenumber','calledno','starttime','Duration_Minutes'];
-    const aoa = [OCOLS, ...c.outRows.map(r => OCOLS.map(k => r[k]))];
-    const ws = XLSX.utils.aoa_to_sheet(aoa);
-    const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
-    for (let C = range.s.c; C <= range.e.c; C++) {
-      const a = XLSX.utils.encode_cell({ r: 0, c: C });
-      if (ws[a]) ws[a].s = TFN_STYLE.hdr;
-    }
-    ws['!cols'] = [{wch:24},{wch:14},{wch:14},{wch:22},{wch:18}];
+    const data  = c.outRows.map(row => OCOLS.map(k => row[k]));
+    const ws = buildDetailSheet(OCOLS, data, 4, rates.ipcOutbound);
+    ws['!cols'] = [{wch:24},{wch:14},{wch:14},{wch:22},{wch:18},{wch:12}];
     XLSX.utils.book_append_sheet(wb, ws, 'Paricus - Dial Out ');
   }
 
   // DID - Verizon MCI Inbound
   {
-    const aoa = [
-      ['CustomerName','DID','SourceNumber','CallConnectTime','Duration_Minutes','','','','','','','DID Numbers'],
-      ...c.didRows.map((r, i) => [
-        r.CustomerName, r.DID, r.SourceNumber, r.CallConnectTime, r.Duration_Minutes,
-        '','','','','','', i < c.didNumbers.length ? c.didNumbers[i] : ''
-      ]),
-    ];
-    const ws = XLSX.utils.aoa_to_sheet(aoa);
-    const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
-    for (let C = range.s.c; C <= range.e.c; C++) {
-      const a = XLSX.utils.encode_cell({ r: 0, c: C });
-      if (ws[a]) ws[a].s = TFN_STYLE.hdr;
-    }
-    ws['!cols'] = [{wch:14},{wch:14},{wch:14},{wch:22},{wch:18},{wch:4},{wch:4},{wch:4},{wch:4},{wch:4},{wch:4},{wch:14}];
+    const hdrs = ['CustomerName','DID','SourceNumber','CallConnectTime','Duration_Minutes','','','','','','','DID Numbers'];
+    const data  = c.didRows.map((row, i) => [
+      row.CustomerName, row.DID, row.SourceNumber, row.CallConnectTime, row.Duration_Minutes,
+      '','','','','','', i < c.didNumbers.length ? c.didNumbers[i] : '',
+    ]);
+    const ws = buildDetailSheet(hdrs, data, 4, rates.didTraffic);
+    ws['!cols'] = [{wch:14},{wch:14},{wch:14},{wch:22},{wch:18},{wch:4},{wch:4},{wch:4},{wch:4},{wch:4},{wch:4},{wch:14},{wch:12}];
     XLSX.utils.book_append_sheet(wb, ws, 'DID  - Verizon MCI Inbound');
   }
 
   return wb;
 }
 
-function buildTorchWorkbookTFN(c) {
+function buildTorchWorkbookTFN(c, rates) {
+  rates = rates || {};
   const wb = XLSX.utils.book_new();
 
   // Summary
   {
-    const ws = XLSX.utils.aoa_to_sheet([]);
-    const HDR = ['Item','terminationcarriername','TotalAnsweredDurationinMinutes','',''];
+    const ws  = XLSX.utils.aoa_to_sheet([]);
+    const HDR = ['Item', 'Service', 'Duration (min)', 'Amount ($)'];
+    const inSub  = r2(c.amtInbound + c.amtTFNFee);
+    const outSub = r2(c.amtLDInt + c.amtLDIntra + c.amtOutbound);
+    const didSub = r2(c.amtDIDMin + c.amtDIDFee);
     const rows = [
       HDR,
-      ['Torch Wireless TFN','Centercom- Inbound', c.tfnMin, c.amtInbound, ''],
-      ['','TFN Numbers', c.tfnCount, c.amtTFNFee, ''],
-      ['','','','',''],
+      ['Torch Wireless TFN', 'Centercom- Inbound',                 c.tfnMin,   c.amtInbound],
+      ['',                   'TFN Numbers',                         c.tfnCount, c.amtTFNFee],
+      ['',                   'Inbound Subtotal',                    '',          inSub],
+      [],
       HDR,
-      ['','Centercom Long Distance Interstate', c.ldInt, c.amtLDInt, ''],
-      ['','Centercom Long Distance Intrastate', c.ldIntra, c.amtLDIntra, ''],
-      ['','Centercom- Outbound', c.outMin, c.amtOutbound, ''],
-      ['','','','',''],
+      ['',                   'Centercom Long Distance Interstate',  c.ldInt,    c.amtLDInt],
+      ['',                   'Centercom Long Distance Intrastate',  c.ldIntra,  c.amtLDIntra],
+      ['',                   'Centercom- Outbound',                 c.outMin,   c.amtOutbound],
+      ['',                   'Outbound Subtotal',                   '',          outSub],
+      [],
       HDR,
-      ['','DID Duration', c.didMin, c.amtDIDMin, ''],
-      ['','DID Numbers', c.didCount, c.amtDIDFee, ''],
-      ['','','','',''],
-      ['','','TOTAL', c.total, ''],
+      ['',                   'DID Duration',                        c.didMin,   c.amtDIDMin],
+      ['',                   'DID Numbers',                         c.didCount, c.amtDIDFee],
+      ['',                   'DID Subtotal',                        '',          didSub],
+      [],
+      ['', '', 'TOTAL', c.total],
     ];
+    const hdrRows = new Set([0, 5, 11]);
+    const subRows = new Set([3, 9, 14]);
+    const totalRow = rows.length - 1;
     rows.forEach((row, r) => row.forEach((v, col) => {
-      if (v === '') return;
-      const isHdr = r === 0 || r === 4 || r === 9;
-      const isTotal = r === rows.length - 1 && col === 2;
-      const s = isHdr ? TFN_STYLE.hdr : isTotal ? TFN_STYLE.bold : TFN_STYLE.norm;
+      if (v === '' || v == null) return;
+      let s = TFN_STYLE.norm;
+      if (hdrRows.has(r))                         s = TFN_STYLE.hdr;
+      else if (subRows.has(r))                    s = TFN_STYLE.total;
+      else if (r === totalRow && col === 2)       s = TFN_STYLE.bold;
       const z = (col === 3 && typeof v === 'number') ? DOLLAR_FMT : undefined;
       setC(ws, r, col, v, s, z);
     }));
-    setRef(ws, rows.length - 1, 4);
-    ws['!cols'] = [{wch:16},{wch:34},{wch:32},{wch:14},{wch:6}];
+    setRef(ws, rows.length - 1, 3);
+    ws['!cols'] = [{wch:18},{wch:36},{wch:18},{wch:14}];
     XLSX.utils.book_append_sheet(wb, ws, 'Summary');
   }
 
   // Incalls
   {
-    const aoa = [
-      ['SourceNumber','TerminationNumber','calldatetime','Callduration_Minutes','','','Number'],
-      ...c.inRows.map((r, i) => [
-        r.SourceNumber, r.TerminationNumber, r.calldatetime, r.Callduration_Minutes,
-        '','', i < c.tfnNumbers.length ? c.tfnNumbers[i] : ''
-      ]),
-    ];
-    const ws = XLSX.utils.aoa_to_sheet(aoa);
-    const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
-    for (let C = range.s.c; C <= range.e.c; C++) {
-      const a = XLSX.utils.encode_cell({ r: 0, c: C });
-      if (ws[a]) ws[a].s = TFN_STYLE.hdr;
-    }
-    ws['!cols'] = [{wch:14},{wch:14},{wch:22},{wch:20},{wch:4},{wch:4},{wch:14}];
+    const hdrs = ['SourceNumber','TerminationNumber','calldatetime','Callduration_Minutes','','','Number'];
+    const data  = c.inRows.map((row, i) => [
+      row.SourceNumber, row.TerminationNumber, row.calldatetime, row.Callduration_Minutes,
+      '', '', i < c.tfnNumbers.length ? c.tfnNumbers[i] : '',
+    ]);
+    const ws = buildDetailSheet(hdrs, data, 3, rates.inbound);
+    ws['!cols'] = [{wch:14},{wch:14},{wch:22},{wch:20},{wch:4},{wch:4},{wch:14},{wch:12}];
     XLSX.utils.book_append_sheet(wb, ws, ' Incalls');
   }
 
   // Out Calls
   {
     const OCOLS = ['OriginationcarrierName','sourcenumber','terminationnumber','starttime','Duration_Minutes'];
-    const aoa = [OCOLS, ...c.outRows.map(r => OCOLS.map(k => r[k]))];
-    const ws = XLSX.utils.aoa_to_sheet(aoa);
-    const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
-    for (let C = range.s.c; C <= range.e.c; C++) {
-      const a = XLSX.utils.encode_cell({ r: 0, c: C });
-      if (ws[a]) ws[a].s = TFN_STYLE.hdr;
-    }
-    ws['!cols'] = [{wch:24},{wch:14},{wch:14},{wch:22},{wch:18}];
+    const data  = c.outRows.map(row => OCOLS.map(k => row[k]));
+    const ws = buildDetailSheet(OCOLS, data, 4, rates.ipcOutbound);
+    ws['!cols'] = [{wch:24},{wch:14},{wch:14},{wch:22},{wch:18},{wch:12}];
     XLSX.utils.book_append_sheet(wb, ws, 'Out Calls');
   }
 
   // DID sheet
   {
-    const aoa = [
-      ['CustomerName','DID','SourceNumber','CallConnectTime','Duration_Minutes','','','','DID Numbers','',''],
-      ...c.didRows.map((r, i) => [
-        r.CustomerName, r.DID, r.SourceNumber, r.CallConnectTime, r.Duration_Minutes,
-        '','','', i < c.didNumbers.length ? c.didNumbers[i] : '','',''
-      ]),
-    ];
-    const ws = XLSX.utils.aoa_to_sheet(aoa);
-    const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
-    for (let C = range.s.c; C <= range.e.c; C++) {
-      const a = XLSX.utils.encode_cell({ r: 0, c: C });
-      if (ws[a]) ws[a].s = TFN_STYLE.hdr;
-    }
-    ws['!cols'] = [{wch:14},{wch:14},{wch:14},{wch:22},{wch:18},{wch:4},{wch:4},{wch:4},{wch:14}];
+    const hdrs = ['CustomerName','DID','SourceNumber','CallConnectTime','Duration_Minutes','','','','DID Numbers'];
+    const data  = c.didRows.map((row, i) => [
+      row.CustomerName, row.DID, row.SourceNumber, row.CallConnectTime, row.Duration_Minutes,
+      '','','', i < c.didNumbers.length ? c.didNumbers[i] : '',
+    ]);
+    const ws = buildDetailSheet(hdrs, data, 4, rates.didTraffic);
+    ws['!cols'] = [{wch:14},{wch:14},{wch:14},{wch:22},{wch:18},{wch:4},{wch:4},{wch:4},{wch:14},{wch:12}];
     XLSX.utils.book_append_sheet(wb, ws, 'DID ');
   }
 
@@ -2309,6 +2339,13 @@ function buildAuditSheet(wb, customers, vendorBills, rates) {
     return { vendor: vendorTotal, invoice: invoiceTotal, pl, pp };
   }
 
+  // CDR minute totals (derived from customer data for vendor-side comparison)
+  const cdrTFNMin  = r2(nal.tfnMin  + paricus.tfnMin  + torch.tfnMin);
+  const cdrLDInter = r2(nal.ldInt   + paricus.ldInt   + torch.ldInt);
+  const cdrLDIntra = r2(torch.ldIntra || 0);
+  const cdrDIDMin  = r2((paricus.didMin || 0) + (torch.didMin || 0));
+  const cdrOutMin  = r2(nal.outMin  + paricus.outMin  + torch.outMin);
+
   // ── 382 Communications ───────────────────────────────────────
   const weeks = b382.weeks || [];
   const wkLabels = ['Week 1','Week 2','Week 3','Week 4'];
@@ -2316,6 +2353,8 @@ function buildAuditSheet(wb, customers, vendorBills, rates) {
     const w = weeks[i] || {};
     return w.amount != null ? [lbl, w.amount, null, null, null] : null;
   }).filter(Boolean);
+  // Append CDR minute total row on vendor side for minute reconciliation
+  left382.push(['CDR Total Minutes (billed)', null, cdrTFNMin, null, null]);
 
   const right382 = [
     ['Centercom (Torch)', torch.tfnMin, torch.amtInbound, rates.inbound],
@@ -2336,9 +2375,9 @@ function buildAuditSheet(wb, customers, vendorBills, rates) {
 
   // ── Lumen ────────────────────────────────────────────────────
   const leftLumen = [
-    bLI.amount != null ? ['Long Distance Interstate', bLI.amount, null, null, null] : null,
-    bLa.amount != null ? ['Long Distance Intrastate', bLa.amount, null, null, null] : null,
-  ].filter(Boolean);
+    bLI.amount != null ? ['Long Distance Interstate', bLI.amount, cdrLDInter, null, null] : ['Long Distance Interstate', null, cdrLDInter, null, null],
+    bLa.amount != null ? ['Long Distance Intrastate', bLa.amount, cdrLDIntra, null, null] : ['Long Distance Intrastate', null, cdrLDIntra, null, null],
+  ];
 
   const rightLumen = [
     ['Centercom — LD Interstate', torch.ldInt,   torch.amtLDInt,   rates.ldInterstate],
@@ -2352,9 +2391,9 @@ function buildAuditSheet(wb, customers, vendorBills, rates) {
   const sLumen = writeSection('Lumen — Long Distance', leftLumen, rightLumen, null, vendorLumen, invoiceLumen);
 
   // ── MCI / Verizon ────────────────────────────────────────────
-  const leftMCI = bMCI.amount != null
-    ? [['DID Inbound / Outbound', bMCI.amount, null, null, null]]
-    : [];
+  const leftMCI = [
+    ['DID Inbound / Outbound', bMCI.amount != null ? bMCI.amount : null, cdrDIDMin, null, null],
+  ];
 
   const rightMCI = [
     ['Centercom — DID Traffic', torch.didMin,   torch.amtDIDMin,   rates.didTraffic],
@@ -2371,9 +2410,9 @@ function buildAuditSheet(wb, customers, vendorBills, rates) {
   const sMCI = writeSection('MCI / Verizon — DID', leftMCI, rightMCI, numFeesMCI, vendorMCI, invoiceMCI);
 
   // ── IPC ──────────────────────────────────────────────────────
-  const leftIPC = bIPC.amount != null
-    ? [['IPC Outbound', bIPC.amount, null, null, null]]
-    : [];
+  const leftIPC = [
+    ['IPC Outbound', bIPC.amount != null ? bIPC.amount : null, cdrOutMin, null, null],
+  ];
 
   const rightIPC = [
     ['NAL — Outbound',    nal.outMin,    nal.amtOutbound,    rates.ipcOutbound],
@@ -2696,9 +2735,9 @@ app.post('/api/tfn/process', tfnUpload, async (req, res) => {
     }
 
     // Build Excel files
-    const nalWb     = buildNALWorkbookTFN(customers.nal);
-    const paricusWb = buildParicusWorkbookTFN(customers.paricus);
-    const torchWb   = buildTorchWorkbookTFN(customers.torch);
+    const nalWb     = buildNALWorkbookTFN(customers.nal,     rates);
+    const paricusWb = buildParicusWorkbookTFN(customers.paricus, rates);
+    const torchWb   = buildTorchWorkbookTFN(customers.torch,   rates);
     const wpWb      = buildWorkpaperTFN(customers, vendorBills, `321 Comm TFN — ${periodLabel}`, rates);
 
     const ts = Date.now();
