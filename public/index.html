@@ -307,6 +307,9 @@
   <button class="tab-btn" id="tab-btn-2" onclick="switchTab(2)">
     📊 NRT 499Q/A Data Processing
   </button>
+  <button class="tab-btn" id="tab-btn-3" onclick="switchTab(3)">
+    📞 321 Comm TFN Processing
+  </button>
 </div>
 
 <style>
@@ -662,6 +665,268 @@
 </div>
 </div><!-- end tab-2 -->
 
+<!-- ===================== TAB 3: 321 Comm TFN ===================== -->
+<div id="tab-3" style="display:none">
+<div class="container">
+
+  <div class="card">
+    <div class="section-title">About This Tool</div>
+    <p style="font-size:13px;color:#4a5568;line-height:1.6">
+      Upload the <strong>Gopal CDR file</strong> (new version Excel) and any <strong>vendor bills</strong> (PDFs) to automatically
+      generate customer billing files for <strong>NAL, Paricus, and Torch</strong>, plus a <strong>Workpaper Summary</strong>
+      comparing vendor cost vs. customer billing. If a PDF cannot be auto-parsed, enter the total manually before downloading.
+    </p>
+  </div>
+
+  <!-- Step 1: Upload -->
+  <div class="card">
+    <div class="section-title">Step 1 — Upload Files</div>
+    <div class="upload-grid">
+
+      <div class="upload-zone" id="t3-zone-gopal"
+           ondragover="onDrag(event,this)" ondragleave="offDrag(this)"
+           ondrop="t3OnDrop(event,this,'gopal')">
+        <input type="file" id="t3-gopalFile" accept=".xlsx,.xls"
+               onchange="t3OnFile(this,'t3-zone-gopal','t3-fn-gopal','gopal')" />
+        <div class="upload-icon">📊</div>
+        <div class="label">Gopal CDR File <span class="badge-required">Required</span></div>
+        <div class="sublabel">TFN and DIDs — new version Excel</div>
+        <div class="filename" id="t3-fn-gopal"></div>
+      </div>
+
+      <div class="upload-zone" id="t3-zone-ipc"
+           ondragover="onDrag(event,this)" ondragleave="offDrag(this)"
+           ondrop="t3OnDrop(event,this,'ipc')">
+        <input type="file" id="t3-ipcFile" accept=".xlsx,.xls"
+               onchange="t3OnFile(this,'t3-zone-ipc','t3-fn-ipc','ipc')" />
+        <div class="upload-icon">📤</div>
+        <div class="label">Gopal IPC Outbound Version <span class="badge-optional">Recommended</span></div>
+        <div class="sublabel">IPC OUtbound version Excel — for accurate outbound minutes</div>
+        <div class="filename" id="t3-fn-ipc"></div>
+      </div>
+
+      <div class="upload-zone" id="t3-zone-inventory"
+           ondragover="onDrag(event,this)" ondragleave="offDrag(this)"
+           ondrop="t3OnDrop(event,this,'inventory')">
+        <input type="file" id="t3-inventoryFile" accept=".xlsx,.xls"
+               onchange="t3OnFile(this,'t3-zone-inventory','t3-fn-inventory','inventory')" />
+        <div class="upload-icon">📋</div>
+        <div class="label">TFN Inventory File <span class="badge-optional">Recommended</span></div>
+        <div class="sublabel">For accurate TFN number counts &amp; fees</div>
+        <div class="filename" id="t3-fn-inventory"></div>
+      </div>
+
+      <div class="upload-zone" id="t3-zone-didinventory"
+           ondragover="onDrag(event,this)" ondragleave="offDrag(this)"
+           ondrop="t3OnDrop(event,this,'didinventory')">
+        <input type="file" id="t3-didInventoryFile" accept=".xlsx,.xls"
+               onchange="t3OnFile(this,'t3-zone-didinventory','t3-fn-didinventory','didinventory')" />
+        <div class="upload-icon">🔢</div>
+        <div class="label">DID Inventory File <span class="badge-optional">Recommended</span></div>
+        <div class="sublabel">For accurate DID number counts &amp; fees</div>
+        <div class="filename" id="t3-fn-didinventory"></div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Vendor Bill PDFs -->
+  <div class="card">
+    <div class="section-title">Vendor Bill Invoices <span style="font-size:12px;font-weight:400;color:#718096">(PDF — auto-parsed or manual entry)</span></div>
+    <div class="upload-grid">
+
+      <div class="upload-zone" id="t3-zone-bill382" style="cursor:default;border-style:dashed"
+           ondragover="onDrag(event,this)" ondragleave="offDrag(this)"
+           ondrop="t3Drop382(event)">
+        <input type="file" id="t3-bill382File" accept=".pdf" multiple
+               onchange="t3On382(this)"
+               style="position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%" />
+        <div class="upload-icon">📄</div>
+        <div class="label">382 Communications Bills <span class="badge-optional">Optional</span></div>
+        <div class="sublabel">Select up to 4 weekly invoices (rate averaged)</div>
+        <div class="filename" id="t3-fn-bill382"></div>
+      </div>
+
+      <div class="upload-zone" id="t3-zone-billMCI"
+           ondragover="onDrag(event,this)" ondragleave="offDrag(this)"
+           ondrop="t3OnDrop(event,this,'billMCI')">
+        <input type="file" id="t3-billMCIFile" accept=".pdf"
+               onchange="t3OnFile(this,'t3-zone-billMCI','t3-fn-billMCI','billMCI')" />
+        <div class="upload-icon">📄</div>
+        <div class="label">MCI / Verizon Bill <span class="badge-optional">Optional</span></div>
+        <div class="sublabel">DID inbound invoice</div>
+        <div class="filename" id="t3-fn-billMCI"></div>
+      </div>
+
+      <div class="upload-zone" id="t3-zone-billLumen"
+           ondragover="onDrag(event,this)" ondragleave="offDrag(this)"
+           ondrop="t3OnDrop(event,this,'billLumen')">
+        <input type="file" id="t3-billLumenFile" accept=".pdf"
+               onchange="t3OnFile(this,'t3-zone-billLumen','t3-fn-billLumen','billLumen')" />
+        <div class="upload-icon">📄</div>
+        <div class="label">Lumen Bill <span class="badge-optional">Optional</span></div>
+        <div class="sublabel">Interstate &amp; intrastate LD invoice</div>
+        <div class="filename" id="t3-fn-billLumen"></div>
+      </div>
+
+      <div class="upload-zone" id="t3-zone-billIPC"
+           ondragover="onDrag(event,this)" ondragleave="offDrag(this)"
+           ondrop="t3OnDrop(event,this,'billIPC')">
+        <input type="file" id="t3-billIPCFile" accept=".pdf"
+               onchange="t3OnFile(this,'t3-zone-billIPC','t3-fn-billIPC','billIPC')" />
+        <div class="upload-icon">📄</div>
+        <div class="label">IPC Bill <span class="badge-optional">Optional</span></div>
+        <div class="sublabel">Outbound IPC invoice</div>
+        <div class="filename" id="t3-fn-billIPC"></div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Step 2: Process -->
+  <div class="card">
+    <div class="section-title">Step 2 — Process</div>
+    <div class="actions">
+      <button class="btn btn-primary" id="t3-btn-process" onclick="t3Process()">
+        <span>&#9881; Process Files</span>
+        <div class="spinner" id="t3-spin-process"></div>
+      </button>
+      <button class="btn btn-secondary" onclick="t3Reset()" style="font-size:13px">Reset</button>
+    </div>
+    <div id="t3-status" style="font-size:13px;color:#4a5568;margin-top:10px;display:none"></div>
+    <div id="t3-error" class="alert alert-error" style="display:none;margin-top:14px">
+      <span>⚠️</span><span id="t3-error-text"></span>
+    </div>
+  </div>
+
+  <!-- Manual entry for vendor amounts -->
+  <div id="t3-manual-card" class="card" style="display:none;border-top:3px solid #dd6b20">
+    <div class="section-title" style="color:#dd6b20">Vendor Invoice Amounts — Manual Entry</div>
+    <p style="font-size:13px;color:#4a5568;margin-bottom:16px">
+      Enter the invoice amounts below. Rates will be calculated as <strong>(invoice ÷ total minutes) × 1.15</strong>.
+      Leave blank if that carrier had no charges this period.
+    </p>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
+      <div style="grid-column:1/-1">
+        <label style="font-size:12px;font-weight:600;color:#4a5568;display:block;margin-bottom:8px">382 Communications — Weekly Invoices ($)</label>
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">
+          <div>
+            <div style="font-size:11px;color:#718096;margin-bottom:3px">Week 1</div>
+            <input id="t3-manual-382-w1" type="number" step="0.01" min="0" placeholder="0.00" class="t3-manual-input"
+                   style="width:100%;padding:7px 10px;border:1px solid #cbd5e0;border-radius:6px;font-size:13px;box-sizing:border-box" />
+          </div>
+          <div>
+            <div style="font-size:11px;color:#718096;margin-bottom:3px">Week 2</div>
+            <input id="t3-manual-382-w2" type="number" step="0.01" min="0" placeholder="0.00" class="t3-manual-input"
+                   style="width:100%;padding:7px 10px;border:1px solid #cbd5e0;border-radius:6px;font-size:13px;box-sizing:border-box" />
+          </div>
+          <div>
+            <div style="font-size:11px;color:#718096;margin-bottom:3px">Week 3</div>
+            <input id="t3-manual-382-w3" type="number" step="0.01" min="0" placeholder="0.00" class="t3-manual-input"
+                   style="width:100%;padding:7px 10px;border:1px solid #cbd5e0;border-radius:6px;font-size:13px;box-sizing:border-box" />
+          </div>
+          <div>
+            <div style="font-size:11px;color:#718096;margin-bottom:3px">Week 4</div>
+            <input id="t3-manual-382-w4" type="number" step="0.01" min="0" placeholder="0.00" class="t3-manual-input"
+                   style="width:100%;padding:7px 10px;border:1px solid #cbd5e0;border-radius:6px;font-size:13px;box-sizing:border-box" />
+          </div>
+        </div>
+      </div>
+      <div>
+        <label style="font-size:12px;font-weight:600;color:#4a5568;display:block;margin-bottom:4px">MCI / Verizon Total ($)</label>
+        <input id="t3-manual-mci" type="number" step="0.01" min="0" placeholder="0.00" class="t3-manual-input"
+               style="width:100%;padding:7px 10px;border:1px solid #cbd5e0;border-radius:6px;font-size:13px;box-sizing:border-box" />
+      </div>
+      <div>
+        <label style="font-size:12px;font-weight:600;color:#4a5568;display:block;margin-bottom:4px">Lumen — Interstate Amount ($)</label>
+        <input id="t3-manual-lumeninter" type="number" step="0.01" min="0" placeholder="0.00" class="t3-manual-input"
+               style="width:100%;padding:7px 10px;border:1px solid #cbd5e0;border-radius:6px;font-size:13px;box-sizing:border-box" />
+      </div>
+      <div>
+        <label style="font-size:12px;font-weight:600;color:#4a5568;display:block;margin-bottom:4px">Lumen — Intrastate Amount ($)</label>
+        <input id="t3-manual-lumenintra" type="number" step="0.01" min="0" placeholder="0.00" class="t3-manual-input"
+               style="width:100%;padding:7px 10px;border:1px solid #cbd5e0;border-radius:6px;font-size:13px;box-sizing:border-box" />
+      </div>
+      <div>
+        <label style="font-size:12px;font-weight:600;color:#4a5568;display:block;margin-bottom:4px">IPC Total ($)</label>
+        <input id="t3-manual-ipc" type="number" step="0.01" min="0" placeholder="0.00" class="t3-manual-input"
+               style="width:100%;padding:7px 10px;border:1px solid #cbd5e0;border-radius:6px;font-size:13px;box-sizing:border-box" />
+      </div>
+    </div>
+    <div style="margin-top:16px">
+      <button class="btn btn-primary" onclick="t3Reprocess()">
+        <span>&#9881; Re-process with Amounts</span>
+        <div class="spinner" id="t3-spin-reprocess"></div>
+      </button>
+    </div>
+  </div>
+
+  <!-- Results -->
+  <div id="t3-results" style="display:none">
+
+    <!-- Summary stats -->
+    <div class="card">
+      <div class="section-title" style="margin-bottom:14px">Processing Summary</div>
+      <div id="t3-stat-grid" class="summary-grid"></div>
+    </div>
+
+    <!-- Vendor bill status -->
+    <div class="card" id="t3-vendor-card" style="display:none">
+      <div class="section-title" style="margin-bottom:10px">Vendor Invoices &amp; Computed Rates <span style="font-size:11px;font-weight:400;color:#718096">(invoice ÷ total mins × 1.15 markup)</span></div>
+      <table class="breakdown-table">
+        <thead><tr><th>Carrier</th><th>Invoice Amount</th><th>Total Minutes</th><th>Rate / Min</th><th>Source</th></tr></thead>
+        <tbody id="t3-vendor-tbody"></tbody>
+      </table>
+    </div>
+
+    <!-- Downloads -->
+    <div class="card" style="border-top:3px solid #276749">
+      <div class="section-title" style="color:#276749;margin-bottom:14px">Step 3 — Download Files</div>
+      <div class="actions" style="flex-wrap:wrap;gap:10px">
+        <button class="btn btn-success" onclick="t3Download('Workpaper')">
+          <span>&#8595; Workpaper Summary</span>
+          <div class="spinner" id="t3-spin-wp"></div>
+        </button>
+        <button class="btn" style="background:linear-gradient(135deg,#702459,#b83280);color:white" onclick="t3Download('NAL')">
+          <span>&#8595; NAL Customer File</span>
+          <div class="spinner" id="t3-spin-nal"></div>
+        </button>
+        <button class="btn" style="background:linear-gradient(135deg,#2c5282,#3182ce);color:white" onclick="t3Download('Paricus')">
+          <span>&#8595; Paricus Customer File</span>
+          <div class="spinner" id="t3-spin-paricus"></div>
+        </button>
+        <button class="btn" style="background:linear-gradient(135deg,#276749,#38a169);color:white" onclick="t3Download('Torch')">
+          <span>&#8595; Torch Customer File</span>
+          <div class="spinner" id="t3-spin-torch"></div>
+        </button>
+      </div>
+      <div id="t3-dl-status" style="font-size:13px;color:#4a5568;margin-top:10px;display:none"></div>
+    </div>
+
+  </div>
+
+  <!-- Rate Reference -->
+  <details style="margin-top:4px">
+    <summary style="font-size:12px;font-weight:700;color:#4a5568;cursor:pointer;user-select:none;padding:8px 0">Rate Reference (click to expand)</summary>
+    <div class="card" style="margin-top:8px;font-size:12px">
+      <table class="breakdown-table">
+        <thead><tr><th>Service</th><th>Carrier</th><th class="count">Rate</th><th>Unit</th></tr></thead>
+        <tbody>
+          <tr><td>TFN Inbound</td><td>382 Communications</td><td class="count">$0.0081</td><td>per minute</td></tr>
+          <tr><td>TFN Number Fee</td><td>—</td><td class="count">$1.75</td><td>per number/month</td></tr>
+          <tr><td>Long Distance Interstate</td><td>Lumen</td><td class="count">$0.031</td><td>per minute</td></tr>
+          <tr><td>Long Distance Intrastate</td><td>Lumen</td><td class="count">$0.040</td><td>per minute</td></tr>
+          <tr><td>IPC Outbound</td><td>IPC</td><td class="count">$0.0389</td><td>per minute</td></tr>
+          <tr><td>DID Traffic</td><td>MCI / Verizon</td><td class="count">$0.0019</td><td>per minute</td></tr>
+          <tr><td>DID Number Fee</td><td>—</td><td class="count">$2.00</td><td>per number/month</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </details>
+
+</div>
+</div><!-- end tab-3 -->
+
 <script>
   const API = '';
   const files = {};
@@ -993,10 +1258,248 @@
 
   // ===================== TAB SWITCHING =====================
   function switchTab(n) {
-    document.getElementById('tab-1').style.display = n === 1 ? 'block' : 'none';
-    document.getElementById('tab-2').style.display = n === 2 ? 'block' : 'none';
-    document.getElementById('tab-btn-1').classList.toggle('active', n === 1);
-    document.getElementById('tab-btn-2').classList.toggle('active', n === 2);
+    [1,2,3].forEach(i => {
+      document.getElementById('tab-' + i).style.display = n === i ? 'block' : 'none';
+      document.getElementById('tab-btn-' + i).classList.toggle('active', n === i);
+    });
+  }
+
+  // ===================== TAB 3 — 321 Comm TFN =====================
+  const t3files = { gopal: null, ipc: null, inventory: null, didinventory: null, bill382: [], billMCI: null, billLumen: null, billIPC: null };
+  let t3token = null;
+
+  function t3OnFile(input, zoneId, fnId, key) {
+    const file = input.files[0];
+    if (!file) return;
+    t3files[key] = file;
+    document.getElementById(zoneId).classList.add('has-file');
+    document.getElementById(fnId).textContent = file.name;
+  }
+
+  function t3OnDrop(e, el, key) {
+    e.preventDefault(); el.classList.remove('drag-over');
+    const file = e.dataTransfer.files[0];
+    if (!file) return;
+    t3files[key] = file;
+    el.classList.add('has-file');
+    const fnId = el.id.replace('t3-zone-', 't3-fn-');
+    document.getElementById(fnId).textContent = file.name;
+    const inp = el.querySelector('input[type=file]');
+    const dt = new DataTransfer(); dt.items.add(file); inp.files = dt.files;
+  }
+
+  function t3On382(input) {
+    const files = [...input.files].slice(0, 4);
+    if (!files.length) return;
+    t3files.bill382 = files;
+    document.getElementById('t3-zone-bill382').classList.add('has-file');
+    document.getElementById('t3-fn-bill382').textContent =
+      files.length === 1 ? files[0].name : `${files.length} weekly invoices selected`;
+  }
+
+  function t3Drop382(e) {
+    e.preventDefault();
+    const zone = document.getElementById('t3-zone-bill382');
+    zone.classList.remove('drag-over');
+    const files = [...e.dataTransfer.files].filter(f => f.name.toLowerCase().endsWith('.pdf')).slice(0, 4);
+    if (!files.length) return;
+    t3files.bill382 = files;
+    zone.classList.add('has-file');
+    document.getElementById('t3-fn-bill382').textContent =
+      files.length === 1 ? files[0].name : `${files.length} weekly invoices selected`;
+    const inp = document.getElementById('t3-bill382File');
+    const dt = new DataTransfer(); files.forEach(f => dt.items.add(f)); inp.files = dt.files;
+  }
+
+  function t3BuildForm() {
+    const fd = new FormData();
+    if (t3files.gopal)        fd.append('gopalFile',        t3files.gopal);
+    if (t3files.ipc)          fd.append('ipcFile',          t3files.ipc);
+    if (t3files.inventory)    fd.append('inventoryFile',    t3files.inventory);
+    if (t3files.didinventory) fd.append('didInventoryFile', t3files.didinventory);
+    t3files.bill382.forEach(f => fd.append('bill382', f));
+    if (t3files.billMCI)      fd.append('billMCI',          t3files.billMCI);
+    if (t3files.billLumen)    fd.append('billLumen',        t3files.billLumen);
+    if (t3files.billIPC)      fd.append('billIPC',          t3files.billIPC);
+    // manual amounts — 4 weekly 382 fields
+    [1,2,3,4].forEach(w => {
+      const v = document.getElementById(`t3-manual-382-w${w}`)?.value;
+      if (v) fd.append(`manual382_w${w}`, v);
+    });
+    const mMCI        = document.getElementById('t3-manual-mci')?.value;
+    const mLumenInter = document.getElementById('t3-manual-lumeninter')?.value;
+    const mLumenIntra = document.getElementById('t3-manual-lumenintra')?.value;
+    const mIPC        = document.getElementById('t3-manual-ipc')?.value;
+    if (mMCI)        fd.append('manualMCI',        mMCI);
+    if (mLumenInter) fd.append('manualLumenInter', mLumenInter);
+    if (mLumenIntra) fd.append('manualLumenIntra', mLumenIntra);
+    if (mIPC)        fd.append('manualIPC',        mIPC);
+    return fd;
+  }
+
+  function t3SetStatus(msg) {
+    const el = document.getElementById('t3-status');
+    el.textContent = msg; el.style.display = msg ? 'block' : 'none';
+  }
+
+  function t3ShowError(msg) {
+    document.getElementById('t3-error-text').textContent = msg;
+    document.getElementById('t3-error').style.display = 'flex';
+  }
+
+  async function t3Process() {
+    document.getElementById('t3-error').style.display = 'none';
+    if (!t3files.gopal) { t3ShowError('Please upload the Gopal CDR file (Required).'); return; }
+
+    // Determine which spinner to show
+    const manualCard = document.getElementById('t3-manual-card');
+    const spinId = manualCard.style.display !== 'none' ? 't3-spin-reprocess' : 't3-spin-process';
+    document.getElementById(spinId).style.display = 'block';
+    t3SetStatus('Processing CDR data and vendor bills…');
+    document.getElementById('t3-results').style.display = 'none';
+    document.getElementById('t3-manual-card').style.display = 'none';
+
+    try {
+      const resp = await fetch(`${API}/api/tfn/process`, { method: 'POST', body: t3BuildForm() });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'Processing failed');
+      t3token = data.token;
+      t3SetStatus('');
+      t3RenderResults(data);
+    } catch(e) {
+      t3ShowError(e.message);
+      t3SetStatus('');
+    } finally {
+      document.getElementById(spinId).style.display = 'none';
+    }
+  }
+
+  function t3Reprocess() {
+    t3Process();
+  }
+
+  function t3RenderResults(data) {
+    const { summary, vendorBills, rates, totMins, needsManualEntry } = data;
+    const fmtAmt  = n => '$' + (n||0).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
+    const fmtMin  = n => (n||0).toLocaleString('en-US', {minimumFractionDigits:1, maximumFractionDigits:1});
+    const fmtRate = n => n ? '$' + (n||0).toFixed(4) : '—';
+
+    // If no summary yet, just show the manual entry card and stop
+    if (!summary) {
+      document.getElementById('t3-manual-card').style.display = 'block';
+      document.getElementById('t3-manual-card').scrollIntoView({ behavior: 'smooth' });
+      return;
+    }
+
+    // Stat grid
+    const netProfit = (summary.totalCustomer || 0) - (summary.totalVendor || 0);
+    const margin    = summary.totalCustomer > 0 ? ((netProfit / summary.totalCustomer) * 100).toFixed(1) : '0.0';
+    document.getElementById('t3-stat-grid').innerHTML = `
+      <div class="stat-card blue"><div class="value">${fmtAmt(summary.nal.total)}</div><div class="label">NAL Total</div></div>
+      <div class="stat-card blue"><div class="value">${fmtAmt(summary.paricus.total)}</div><div class="label">Paricus Total</div></div>
+      <div class="stat-card blue"><div class="value">${fmtAmt(summary.torch.total)}</div><div class="label">Torch Total</div></div>
+      <div class="stat-card green"><div class="value">${fmtAmt(summary.totalCustomer)}</div><div class="label">Total Billed</div></div>
+      <div class="stat-card orange"><div class="value">${fmtAmt(summary.totalVendor)}</div><div class="label">Total Vendor Cost</div></div>
+      <div class="stat-card ${netProfit >= 0 ? 'green' : 'red'}"><div class="value">${fmtAmt(netProfit)}</div><div class="label">Net Profit</div></div>
+      <div class="stat-card blue"><div class="value">${margin}%</div><div class="label">Margin</div></div>
+      <div class="stat-card blue"><div class="value">${summary.nal.tfnMin ? fmtMin(summary.nal.tfnMin) : '—'}</div><div class="label">NAL TFN Min</div></div>
+      <div class="stat-card blue"><div class="value">${summary.paricus.tfnMin ? fmtMin(summary.paricus.tfnMin) : '—'}</div><div class="label">Paricus TFN Min</div></div>
+      <div class="stat-card blue"><div class="value">${summary.torch.tfnMin ? fmtMin(summary.torch.tfnMin) : '—'}</div><div class="label">Torch TFN Min</div></div>
+      <div class="stat-card blue"><div class="value">${summary.nal.tfnNums || 0}</div><div class="label">NAL TFN #s</div></div>
+      <div class="stat-card blue"><div class="value">${summary.paricus.tfnNums || 0}</div><div class="label">Paricus TFN #s</div></div>
+      <div class="stat-card blue"><div class="value">${summary.torch.tfnNums || 0}</div><div class="label">Torch TFN #s</div></div>
+    `;
+
+    // Vendor bills + computed rates table
+    if (vendorBills && rates) {
+      document.getElementById('t3-vendor-card').style.display = 'block';
+      const b382     = vendorBills.find(b=>b.label==='382 Communications');
+      const week382  = b382?.weeks || [];
+      const rateRows = [
+        { label: '382 Communications', invoice: b382, mins: totMins?.tfnIn, rate: rates.inbound, weekly: week382 },
+        { label: 'MCI / Verizon',      invoice: vendorBills.find(b=>b.label==='MCI/Verizon'),        mins: totMins?.didIn,    rate: rates.didTraffic,   minsLabel: 'DID Inbound' },
+        { label: 'Lumen Interstate',   invoice: vendorBills.find(b=>b.label==='Lumen Interstate'),   mins: totMins?.ldInter,  rate: rates.ldInterstate, minsLabel: 'LD Interstate' },
+        { label: 'Lumen Intrastate',   invoice: vendorBills.find(b=>b.label==='Lumen Intrastate'),   mins: totMins?.ldIntra,  rate: rates.ldIntrastate, minsLabel: 'LD Intrastate' },
+        { label: 'IPC Outbound',       invoice: vendorBills.find(b=>b.label==='IPC'),                mins: totMins?.ipcOut,   rate: rates.ipcOutbound,  minsLabel: 'IPC Outbound' },
+      ];
+      document.getElementById('t3-vendor-tbody').innerHTML = rateRows.map(r => {
+        const amt    = r.invoice?.amount;
+        const status = r.invoice?.parsedOK
+          ? '<span style="color:#276749;font-weight:600">✓ Parsed</span>'
+          : r.invoice?.manualUsed
+            ? '<span style="color:#6b46c1;font-weight:600">✎ Manual</span>'
+            : '<span style="color:#a0aec0">— None</span>';
+        const weeklyHtml = r.weekly?.length
+          ? '<div style="font-size:11px;color:#718096;margin-top:4px">' +
+            r.weekly.map((w,i) => w.amount != null ? `Wk${i+1}: ${fmtAmt(w.amount)}` : null)
+              .filter(Boolean).join(' &nbsp;|&nbsp; ') +
+            '</div>'
+          : '';
+        return `<tr>
+          <td style="font-weight:600">${r.label}${weeklyHtml}</td>
+          <td>${amt != null ? fmtAmt(amt) : '—'}</td>
+          <td>${r.mins != null ? fmtMin(r.mins) + ' min' : '—'}</td>
+          <td style="font-weight:700;color:#1a365d">${fmtRate(r.rate)}/min</td>
+          <td>${status}</td>
+        </tr>`;
+      }).join('');
+    }
+
+    // Show manual entry card if any amounts missing
+    if (needsManualEntry) {
+      document.getElementById('t3-manual-card').style.display = 'block';
+      document.getElementById('t3-manual-card').scrollIntoView({ behavior: 'smooth' });
+      return;
+    }
+
+    document.getElementById('t3-results').style.display = 'block';
+    document.getElementById('t3-results').scrollIntoView({ behavior: 'smooth' });
+  }
+
+  async function t3Download(type) {
+    if (!t3token) { alert('Please process files first.'); return; }
+    const spinId = { Workpaper: 't3-spin-wp', NAL: 't3-spin-nal', Paricus: 't3-spin-paricus', Torch: 't3-spin-torch' }[type];
+    const names  = { Workpaper: 'TFN_Workpaper_Summary.xlsx', NAL: 'NAL_TFN_Customer_File.xlsx', Paricus: 'Paricus_TFN_Customer_File.xlsx', Torch: 'Torch_TFN_Customer_File.xlsx' };
+    document.getElementById(spinId).style.display = 'block';
+    const statusEl = document.getElementById('t3-dl-status');
+    statusEl.textContent = `Downloading ${names[type]}…`; statusEl.style.display = 'block';
+    try {
+      const resp = await fetch(`${API}/api/tfn/download/${t3token}/${type}`);
+      if (!resp.ok) { const d = await resp.json().catch(()=>({})); throw new Error(d.error || 'Download failed'); }
+      const blob = await resp.blob();
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a'); a.href = url; a.download = names[type]; a.click();
+      URL.revokeObjectURL(url);
+      statusEl.textContent = `${names[type]} downloaded successfully.`;
+    } catch(e) {
+      t3ShowError(e.message); statusEl.style.display = 'none';
+    } finally {
+      document.getElementById(spinId).style.display = 'none';
+    }
+  }
+
+  function t3Reset() {
+    Object.keys(t3files).forEach(k => t3files[k] = k === 'bill382' ? [] : null);
+    t3token = null;
+    ['t3-zone-gopal','t3-zone-ipc','t3-zone-inventory','t3-zone-didinventory',
+     't3-zone-bill382','t3-zone-billMCI','t3-zone-billLumen','t3-zone-billIPC'].forEach(id => {
+      const el = document.getElementById(id); if (el) el.classList.remove('has-file');
+    });
+    ['t3-fn-gopal','t3-fn-ipc','t3-fn-inventory','t3-fn-didinventory',
+     't3-fn-bill382','t3-fn-billMCI','t3-fn-billLumen','t3-fn-billIPC'].forEach(id => {
+      const el = document.getElementById(id); if (el) el.textContent = '';
+    });
+    ['t3-gopalFile','t3-ipcFile','t3-inventoryFile','t3-didInventoryFile',
+     't3-bill382File','t3-billMCIFile','t3-billLumenFile','t3-billIPCFile'].forEach(id => {
+      const el = document.getElementById(id); if (el) el.value = '';
+    });
+    ['t3-manual-382-w1','t3-manual-382-w2','t3-manual-382-w3','t3-manual-382-w4',
+     't3-manual-mci','t3-manual-lumeninter','t3-manual-lumenintra','t3-manual-ipc'].forEach(id => {
+      const el = document.getElementById(id); if (el) el.value = '';
+    });
+    ['t3-status','t3-error','t3-results','t3-manual-card','t3-vendor-card','t3-dl-status'].forEach(id => {
+      const el = document.getElementById(id); if (el) el.style.display = 'none';
+    });
   }
 
   // ===================== TAB 2 JS =====================

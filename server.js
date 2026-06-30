@@ -1661,5 +1661,1100 @@ app.post('/api/499qa/process', glUpload, (req, res) => {
 });
 
 if (!fs.existsSync('uploads')) fs.mkdirSync('uploads');
+
+// ============================================================
+// TAB 3 — 321 Comm TFN Data Processing
+// ============================================================
+
+let pdfParse = null;
+try { pdfParse = require('pdf-parse'); } catch(e) { /* graceful fallback */ }
+
+const archiver = require('archiver');
+
+const TFN_FEES = {
+  tfnNumberFee: 1.75,  // per TFN number/month
+  didNumberFee: 2.00,  // per DID number/month
+};
+
+const MARKUP = 1.15;
+
+// r4 for per-minute rates (4 decimal places for precision)
+function r4(n) { return Math.round((n || 0) * 10000) / 10000; }
+
+// Compute dynamic per-minute rates from vendor invoices + total minutes
+// invoices: { amt382, amtMCI, amtLumenInter, amtLumenIntra, amtIPC }
+// totMins:  { tfnIn, didIn, ldInter, ldIntra, ipcOut }
+function computeRates(invoices, totMins) {
+  const safe = (amt, mins) => (amt && mins) ? r4((amt / mins) * MARKUP) : 0;
+  return {
+    inbound:      safe(invoices.amt382,        totMins.tfnIn),
+    didTraffic:   safe(invoices.amtMCI,        totMins.didIn),
+    ldInterstate: safe(invoices.amtLumenInter, totMins.ldInter),
+    ldIntrastate: safe(invoices.amtLumenIntra, totMins.ldIntra),
+    ipcOutbound:  safe(invoices.amtIPC,        totMins.ipcOut),
+  };
+}
+
+// Extract total minutes across all customers from parsed Gopal summary + IPC file
+function computeTotalMins(gopalSummary, ipcOutbound) {
+  const { tfnInbound, didInbound, lumenLD } = gopalSummary;
+  const sum = obj => Object.values(obj).reduce((s, v) => s + (v || 0), 0);
+  const ldInter = Object.values(lumenLD).reduce((s, v) => s + (v['Long Distance Interstate'] || 0), 0);
+  const ldIntra = Object.values(lumenLD).reduce((s, v) => s + (v['Long Distance Intrastate'] || 0), 0);
+  return {
+    tfnIn:  r2(sum(tfnInbound)),
+    didIn:  r2(sum(didInbound)),
+    ldInter: r2(ldInter),
+    ldIntra: r2(ldIntra),
+    ipcOut: r2(sum(ipcOutbound)),
+  };
+}
+
+function r2(n) { return Math.round((n || 0) * 100) / 100; }
+
+// ── Parse TFN Inventory for number counts per customer ────────
+function parseTFNInventory(filePath) {
+  const wb    = XLSX.readFile(filePath);
+  const rows  = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '' });
+  const counts = {};
+  for (const row of rows) {
+    const cust = String(row['Customer Name'] || '').trim();
+    if (!cust) continue;
+    counts[cust] = (counts[cust] || 0) + 1;
+  }
+  return counts; // { 'Paricus': 25, 'Centercom': 81, 'NAL': 7, ... }
+}
+
+// ── Parse DID Inventory for DID number counts per customer ────
+function parseDIDInventory(filePath) {
+  const wb   = XLSX.readFile(filePath);
+  const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: '' });
+  const headers = rows[0];
+  const custIdx = headers.indexOf('Customers assigned');
+  if (custIdx < 0) return {};
+  const counts = {};
+  for (const row of rows.slice(1)) {
+    const cust = String(row[custIdx] || '').trim();
+    if (!cust) continue;
+    counts[cust] = (counts[cust] || 0) + 1;
+  }
+  return counts; // { 'Paricus': 50, 'Centercom': 87, ... }
+}
+
+// ── Parse IPC Outbound file for outbound minutes per customer ─
+function parseIPCOutboundFile(filePath) {
+  const wb      = XLSX.readFile(filePath);
+  const summWS  = wb.Sheets['Summary'];
+  const minutes = {}; // customerName → total outbound minutes
+  if (!summWS) return minutes;
+  const rows = XLSX.utils.sheet_to_json(summWS, { header: 1, defval: '' });
+  let inSection = false;
+  for (const row of rows) {
+    const c0 = String(row[0] || '').trim();
+    if (c0.includes('IPC') || c0.includes('Termination')) { inSection = true; continue; }
+    if (!inSection) continue;
+    if (c0 === 'OriginationcarrierName' || !c0) continue;
+    if (typeof row[2] === 'number') minutes[c0] = (minutes[c0] || 0) + row[2];
+  }
+  return minutes;
+}
+
+// ── Parse Gopal new-version CDR file ─────────────────────────
+function parseGopalFile(filePath) {
+  const wb   = XLSX.readFile(filePath);
+  const data = { summary: { tfnInbound: {}, didInbound: {}, lumenLD: {} }, cdrs: {} };
+
+  const summaryWS = wb.Sheets['Summary'];
+  if (summaryWS) {
+    const rows    = XLSX.utils.sheet_to_json(summaryWS, { header: 1, defval: '' });
+    let section   = null;
+    for (const row of rows) {
+      const c0 = String(row[0] || '').trim();
+      const c1 = String(row[1] || '').trim();
+      if (c0.includes('382'))                { section = 'tfn'; continue; }
+      if (c0.includes('DID--'))              { section = 'did'; continue; }
+      if (c0.includes('Lumen') || c0.includes('Termination Calls')) { section = 'lumen'; continue; }
+      if (!c0 || c0 === 'CustomerName' || c0 === 'OriginationcarrierName') continue;
+      if (section === 'tfn'   && typeof row[1] === 'number') data.summary.tfnInbound[c0] = row[1];
+      if (section === 'did'   && typeof row[1] === 'number') data.summary.didInbound[c0] = row[1];
+      if (section === 'lumen' && typeof row[2] === 'number') {
+        if (!data.summary.lumenLD[c0]) data.summary.lumenLD[c0] = {};
+        data.summary.lumenLD[c0][c1] = (data.summary.lumenLD[c0][c1] || 0) + row[2];
+      }
+    }
+  }
+
+  for (const sn of wb.SheetNames) {
+    if (sn === 'Summary') continue;
+    data.cdrs[sn] = XLSX.utils.sheet_to_json(wb.Sheets[sn], { header: 1, defval: '' });
+  }
+  return data;
+}
+
+// ── Slice column group from raw rows (array-of-arrays) ───────
+function sliceCols(rows, colMap) {
+  // colMap: { fieldName: colIndex, ... }
+  const firstIdx = Object.values(colMap)[0];
+  return rows.slice(1)
+    .filter(r => r[firstIdx] !== '' && r[firstIdx] !== null && r[firstIdx] !== undefined)
+    .map(r => {
+      const obj = {};
+      for (const [field, idx] of Object.entries(colMap)) obj[field] = r[idx];
+      return obj;
+    });
+}
+
+// ── Compute per-customer data from parsed Gopal ───────────────
+function computeTFNCustomers(gopal, inventoryCounts, ipcOutbound, didInventoryCounts, rates) {
+  const { summary, cdrs } = gopal;
+  inventoryCounts    = inventoryCounts    || {};
+  ipcOutbound        = ipcOutbound        || {};
+  didInventoryCounts = didInventoryCounts || {};
+  rates              = rates              || {};
+
+  const numCount = (invKey, cdrNums) => inventoryCounts[invKey]    || cdrNums.length;
+  const didCount = (invKey, cdrNums) => didInventoryCounts[invKey] || cdrNums.length;
+
+  const outMins = (ipcKey, cdrRows) =>
+    ipcOutbound[ipcKey] != null
+      ? r2(ipcOutbound[ipcKey])
+      : r2(cdrRows.reduce((s, r) => s + (parseFloat(r.Duration_Minutes) || 0), 0));
+
+  // ── NAL ──
+  const nalSheet   = cdrs['NAL CDR-In and Out'] || [];
+  const nalIn      = sliceCols(nalSheet, { SourceNumber: 0, TerminationNumber: 1, calldatetime: 2, Callduration_Minutes: 3 });
+  const nalOutCDR  = sliceCols(nalSheet, { OriginationcarrierName: 11, sourcenumber: 12, terminationnumber: 13, starttime: 14, Duration_Minutes: 15 });
+  const nalTFNNums = [...new Set(nalIn.map(r => r.TerminationNumber).filter(Boolean))];
+
+  const nalTFNMin   = r2(summary.tfnInbound['NorthAmericanLocal'] || 0);
+  const nalLDMins   = summary.lumenLD['NorthAmericanLocal'] || {};
+  const nalLDInt    = r2(nalLDMins['Long Distance Interstate'] || 0);
+  const nalOutMin   = outMins('NorthAmericanLocal', nalOutCDR);
+  const nalTFNCount = numCount('NorthAmericanLocal', nalTFNNums);
+
+  const nalAmtInbound  = r2(nalTFNMin   * (rates.inbound      || 0));
+  const nalAmtTFNFee   = r2(nalTFNCount * TFN_FEES.tfnNumberFee);
+  const nalAmtLDInt    = r2(nalLDInt    * (rates.ldInterstate || 0));
+  const nalAmtOutbound = r2(nalOutMin   * (rates.ipcOutbound  || 0));
+  const nalTotal       = r2(nalAmtInbound + nalAmtTFNFee + nalAmtLDInt + nalAmtOutbound);
+
+  // ── Paricus ──
+  const parInSheet  = cdrs['Paricus - Inbound']  || [];
+  const parOutSheet = cdrs['Paricus - Dial Out']  || [];
+  const parIn      = sliceCols(parInSheet,  { SourceNumber: 0, TerminationNumber: 1, calldatetime: 2, Callduration_Minutes: 3 });
+  const parDID     = sliceCols(parInSheet,  { CustomerName: 10, DID: 11, SourceNumber: 12, CallConnectTime: 13, Duration_Minutes: 14 });
+  const parOutCDR  = sliceCols(parOutSheet, { OriginationcarrierName: 0, sourcenumber: 1, calledno: 2, starttime: 3, Duration_Minutes: 4 });
+  const parTFNNums = [...new Set(parIn.map(r => r.TerminationNumber).filter(Boolean))];
+  const parDIDNums = [...new Set(parDID.map(r => r.DID).filter(Boolean))];
+
+  const parTFNMin   = r2(summary.tfnInbound['Paricus'] || 0);
+  const parDIDMin   = r2(summary.didInbound['Paricus']  || 0);
+  const parLDMins   = summary.lumenLD['Paricus'] || {};
+  const parLDInt    = r2(parLDMins['Long Distance Interstate'] || 0);
+  const parOutMin   = outMins('Paricus', parOutCDR);
+  const parTFNCount = numCount('Paricus', parTFNNums);
+  const parDIDCount = didCount('Paricus', parDIDNums);
+
+  const parAmtInbound  = r2(parTFNMin   * (rates.inbound      || 0));
+  const parAmtTFNFee   = r2(parTFNCount * TFN_FEES.tfnNumberFee);
+  const parAmtLDInt    = r2(parLDInt    * (rates.ldInterstate || 0));
+  const parAmtOutbound = r2(parOutMin   * (rates.ipcOutbound  || 0));
+  const parAmtDIDMin   = r2(parDIDMin   * (rates.didTraffic   || 0));
+  const parAmtDIDFee   = r2(parDIDCount * TFN_FEES.didNumberFee);
+  const parTotal       = r2(parAmtInbound + parAmtTFNFee + parAmtLDInt + parAmtOutbound + parAmtDIDMin + parAmtDIDFee);
+
+  // ── Torch (Centercom) ──
+  const torchSheet    = cdrs['Centercom CDR--In and OUt'] || [];
+  const torchIn       = sliceCols(torchSheet, { SourceNumber: 0, TerminationNumber: 1, calldatetime: 2, Callduration_Minutes: 3 });
+  const torchOutCDR   = sliceCols(torchSheet, { OriginationcarrierName: 8, sourcenumber: 9, terminationnumber: 10, starttime: 11, Duration_Minutes: 12 });
+  const torchDID      = sliceCols(torchSheet, { CustomerName: 18, DID: 19, SourceNumber: 20, CallConnectTime: 21, Duration_Minutes: 22 });
+  const torchTFNNums  = [...new Set(torchIn.map(r => r.TerminationNumber).filter(Boolean))];
+  const torchDIDNums  = [...new Set(torchDID.map(r => r.DID).filter(Boolean))];
+
+  const torchTFNMin   = r2(summary.tfnInbound['Centercom'] || 0);
+  const torchDIDMin   = r2(summary.didInbound['Centercom']  || 0);
+  const torchLDMins   = summary.lumenLD['Centercom'] || {};
+  const torchLDInt    = r2(torchLDMins['Long Distance Interstate']  || 0);
+  const torchLDIntra  = r2(torchLDMins['Long Distance Intrastate']  || 0);
+  const torchOutMin   = outMins('Centercom', torchOutCDR);
+  const torchTFNCount = numCount('Centercom', torchTFNNums);
+  const torchDIDCount = didCount('Centercom', torchDIDNums);
+
+  const torchAmtInbound  = r2(torchTFNMin   * (rates.inbound      || 0));
+  const torchAmtTFNFee   = r2(torchTFNCount * TFN_FEES.tfnNumberFee);
+  const torchAmtLDInt    = r2(torchLDInt    * (rates.ldInterstate || 0));
+  const torchAmtLDIntra  = r2(torchLDIntra  * (rates.ldIntrastate || 0));
+  const torchAmtOutbound = r2(torchOutMin   * (rates.ipcOutbound  || 0));
+  const torchAmtDIDMin   = r2(torchDIDMin   * (rates.didTraffic   || 0));
+  const torchAmtDIDFee   = r2(torchDIDCount * TFN_FEES.didNumberFee);
+  const torchTotal       = r2(torchAmtInbound + torchAmtTFNFee + torchAmtLDInt + torchAmtLDIntra + torchAmtOutbound + torchAmtDIDMin + torchAmtDIDFee);
+
+  return {
+    nal: {
+      inRows: nalIn, outRows: nalOutCDR, tfnNumbers: nalTFNNums,
+      tfnCount: nalTFNCount, tfnMin: nalTFNMin, ldInt: nalLDInt, outMin: nalOutMin,
+      amtInbound: nalAmtInbound, amtTFNFee: nalAmtTFNFee,
+      amtLDInt: nalAmtLDInt, amtOutbound: nalAmtOutbound, total: nalTotal,
+    },
+    paricus: {
+      inRows: parIn, outRows: parOutCDR, didRows: parDID,
+      tfnNumbers: parTFNNums, didNumbers: parDIDNums,
+      tfnCount: parTFNCount, didCount: parDIDCount,
+      tfnMin: parTFNMin, didMin: parDIDMin, ldInt: parLDInt, outMin: parOutMin,
+      amtInbound: parAmtInbound, amtTFNFee: parAmtTFNFee,
+      amtLDInt: parAmtLDInt, amtOutbound: parAmtOutbound,
+      amtDIDMin: parAmtDIDMin, amtDIDFee: parAmtDIDFee, total: parTotal,
+    },
+    torch: {
+      inRows: torchIn, outRows: torchOutCDR, didRows: torchDID,
+      tfnNumbers: torchTFNNums, didNumbers: torchDIDNums,
+      tfnCount: torchTFNCount, didCount: torchDIDCount,
+      tfnMin: torchTFNMin, didMin: torchDIDMin,
+      ldInt: torchLDInt, ldIntra: torchLDIntra, outMin: torchOutMin,
+      amtInbound: torchAmtInbound, amtTFNFee: torchAmtTFNFee,
+      amtLDInt: torchAmtLDInt, amtLDIntra: torchAmtLDIntra,
+      amtOutbound: torchAmtOutbound,
+      amtDIDMin: torchAmtDIDMin, amtDIDFee: torchAmtDIDFee, total: torchTotal,
+    },
+    rates,
+  };
+}
+
+// ── Cell style helpers ────────────────────────────────────────
+const TFN_STYLE = {
+  hdr:   { font: { bold: true, color: { rgb: 'FFFFFF' }, name: 'Arial', sz: 10 }, fill: { fgColor: { rgb: '1F4E79' } }, alignment: { horizontal: 'center' } },
+  bold:  { font: { bold: true, name: 'Arial', sz: 10 } },
+  blue:  { font: { bold: true, color: { rgb: '2e75b6' }, name: 'Arial', sz: 10 } },
+  norm:  { font: { name: 'Arial', sz: 10 } },
+  total: { font: { bold: true, name: 'Arial', sz: 10 }, fill: { fgColor: { rgb: 'D9E1F2' } } },
+};
+
+function setC(ws, r, c, v, s, z) {
+  const addr = XLSX.utils.encode_cell({ r, c });
+  ws[addr] = { v, t: typeof v === 'number' ? 'n' : 's' };
+  if (s) ws[addr].s = s;
+  if (z) ws[addr].z = z;
+  return ws[addr];
+}
+
+const DOLLAR_FMT = '$#,##0.00;($#,##0.00);"-"';
+
+function setRef(ws, maxR, maxC) {
+  ws['!ref'] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: maxR, c: maxC } });
+}
+
+// ── Build per-customer workbooks ──────────────────────────────
+function buildNALWorkbookTFN(c) {
+  const wb = XLSX.utils.book_new();
+
+  // Summary sheet
+  {
+    const ws = XLSX.utils.aoa_to_sheet([]);
+    const HDR = ['Item', 'terminationcarriername', 'TotalAnsweredDurationinMinutes', '', ''];
+    const rows = [
+      HDR,
+      ['NAL TFN', 'NorthAmericanLocal- Inbound', c.tfnMin, c.amtInbound, ''],
+      ['', 'TFN Numbers', c.tfnCount, c.amtTFNFee, ''],
+      ['', '', '', '', ''],
+      HDR,
+      ['NAL TFN', 'Long Distance Interstate', c.ldInt, c.amtLDInt, ''],
+      ['', 'NorthAmericanLocal- Outbound', c.outMin, c.amtOutbound, ''],
+      ['', '', '', '', ''],
+      ['', '', 'TOTAL', c.total, ''],
+    ];
+    rows.forEach((row, r) => row.forEach((v, col) => {
+      if (v === '') return;
+      const s = (r === 0 || r === 4) ? TFN_STYLE.hdr : (r === rows.length - 1 && col === 2) ? TFN_STYLE.bold : TFN_STYLE.norm;
+      const z = (col === 3 && typeof v === 'number') ? DOLLAR_FMT : undefined;
+      setC(ws, r, col, v, s, z);
+    }));
+    setRef(ws, rows.length - 1, 4);
+    ws['!cols'] = [{wch:14},{wch:32},{wch:32},{wch:14},{wch:6}];
+    XLSX.utils.book_append_sheet(wb, ws, 'Summary');
+  }
+
+  // Incalls sheet
+  {
+    const aoa = [
+      ['SourceNumber','TerminationNumber','calldatetime','Callduration_Minutes','','','Number','','','','',''],
+      ...c.inRows.map((r, i) => [
+        r.SourceNumber, r.TerminationNumber, r.calldatetime, r.Callduration_Minutes,
+        '','', i < c.tfnNumbers.length ? c.tfnNumbers[i] : '', '','','','',''
+      ]),
+    ];
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
+    for (let C = range.s.c; C <= range.e.c; C++) {
+      const a = XLSX.utils.encode_cell({ r: 0, c: C });
+      if (ws[a]) ws[a].s = TFN_STYLE.hdr;
+    }
+    ws['!cols'] = [{wch:14},{wch:14},{wch:22},{wch:20},{wch:4},{wch:4},{wch:14}];
+    XLSX.utils.book_append_sheet(wb, ws, ' Incalls');
+  }
+
+  // Out Calls sheet
+  {
+    const OCOLS = ['OriginationcarrierName','sourcenumber','terminationnumber','starttime','Duration_Minutes'];
+    const aoa = [OCOLS, ...c.outRows.map(r => OCOLS.map(k => r[k]))];
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
+    for (let C = range.s.c; C <= range.e.c; C++) {
+      const a = XLSX.utils.encode_cell({ r: 0, c: C });
+      if (ws[a]) ws[a].s = TFN_STYLE.hdr;
+    }
+    ws['!cols'] = [{wch:24},{wch:14},{wch:14},{wch:22},{wch:18}];
+    XLSX.utils.book_append_sheet(wb, ws, 'Out Calls');
+  }
+
+  return wb;
+}
+
+function buildParicusWorkbookTFN(c) {
+  const wb = XLSX.utils.book_new();
+
+  // Summary
+  {
+    const ws = XLSX.utils.aoa_to_sheet([]);
+    const HDR1 = ['Item','terminationcarriername','TotalAnsweredDurationinMinutes','',''];
+    const HDR2 = ['Item','OriginationcarrierName','TotalAnsweredDurationinMinutes','',''];
+    const rows = [
+      HDR1,
+      ['Paricus TFN','Paricus-Inbound', c.tfnMin, c.amtInbound, ''],
+      ['','TFN Numbers', c.tfnCount, c.amtTFNFee, ''],
+      ['','','','',''],
+      HDR2,
+      ['','Paricus Long Distance Interstate', c.ldInt, c.amtLDInt, ''],
+      ['','Paricus-Outbound', c.outMin, c.amtOutbound, ''],
+      ['','','','',''],
+      HDR2,
+      ['','DID Traffic', c.didMin, c.amtDIDMin, ''],
+      ['','DID Numbers', c.didCount, c.amtDIDFee, ''],
+      ['','','','',''],
+      ['','','TOTAL', c.total, ''],
+    ];
+    rows.forEach((row, r) => row.forEach((v, col) => {
+      if (v === '') return;
+      const isHdr = r === 0 || r === 4 || r === 8;
+      const isTotal = r === rows.length - 1 && col === 2;
+      const s = isHdr ? TFN_STYLE.hdr : isTotal ? TFN_STYLE.bold : TFN_STYLE.norm;
+      const z = (col === 3 && typeof v === 'number') ? DOLLAR_FMT : undefined;
+      setC(ws, r, col, v, s, z);
+    }));
+    setRef(ws, rows.length - 1, 4);
+    ws['!cols'] = [{wch:14},{wch:34},{wch:32},{wch:14},{wch:6}];
+    XLSX.utils.book_append_sheet(wb, ws, 'Summary');
+  }
+
+  // Paricus - Inbound Toll Free 382
+  {
+    const aoa = [
+      ['SourceNumber','TerminationNumber','calldatetime','Callduration_Minutes','','','TFN Numbers','','','','','','','',''],
+      ...c.inRows.map((r, i) => [
+        r.SourceNumber, r.TerminationNumber, r.calldatetime, r.Callduration_Minutes,
+        '','', i < c.tfnNumbers.length ? c.tfnNumbers[i] : '',
+        '','','','','','','',''
+      ]),
+    ];
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
+    for (let C = range.s.c; C <= range.e.c; C++) {
+      const a = XLSX.utils.encode_cell({ r: 0, c: C });
+      if (ws[a]) ws[a].s = TFN_STYLE.hdr;
+    }
+    ws['!cols'] = [{wch:14},{wch:14},{wch:22},{wch:20},{wch:4},{wch:4},{wch:14}];
+    XLSX.utils.book_append_sheet(wb, ws, 'Paricus - Inbound Toll Free 382');
+  }
+
+  // Paricus - Dial Out
+  {
+    const OCOLS = ['OriginationcarrierName','sourcenumber','calledno','starttime','Duration_Minutes'];
+    const aoa = [OCOLS, ...c.outRows.map(r => OCOLS.map(k => r[k]))];
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
+    for (let C = range.s.c; C <= range.e.c; C++) {
+      const a = XLSX.utils.encode_cell({ r: 0, c: C });
+      if (ws[a]) ws[a].s = TFN_STYLE.hdr;
+    }
+    ws['!cols'] = [{wch:24},{wch:14},{wch:14},{wch:22},{wch:18}];
+    XLSX.utils.book_append_sheet(wb, ws, 'Paricus - Dial Out ');
+  }
+
+  // DID - Verizon MCI Inbound
+  {
+    const aoa = [
+      ['CustomerName','DID','SourceNumber','CallConnectTime','Duration_Minutes','','','','','','','DID Numbers'],
+      ...c.didRows.map((r, i) => [
+        r.CustomerName, r.DID, r.SourceNumber, r.CallConnectTime, r.Duration_Minutes,
+        '','','','','','', i < c.didNumbers.length ? c.didNumbers[i] : ''
+      ]),
+    ];
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
+    for (let C = range.s.c; C <= range.e.c; C++) {
+      const a = XLSX.utils.encode_cell({ r: 0, c: C });
+      if (ws[a]) ws[a].s = TFN_STYLE.hdr;
+    }
+    ws['!cols'] = [{wch:14},{wch:14},{wch:14},{wch:22},{wch:18},{wch:4},{wch:4},{wch:4},{wch:4},{wch:4},{wch:4},{wch:14}];
+    XLSX.utils.book_append_sheet(wb, ws, 'DID  - Verizon MCI Inbound');
+  }
+
+  return wb;
+}
+
+function buildTorchWorkbookTFN(c) {
+  const wb = XLSX.utils.book_new();
+
+  // Summary
+  {
+    const ws = XLSX.utils.aoa_to_sheet([]);
+    const HDR = ['Item','terminationcarriername','TotalAnsweredDurationinMinutes','',''];
+    const rows = [
+      HDR,
+      ['Torch Wireless TFN','Centercom- Inbound', c.tfnMin, c.amtInbound, ''],
+      ['','TFN Numbers', c.tfnCount, c.amtTFNFee, ''],
+      ['','','','',''],
+      HDR,
+      ['','Centercom Long Distance Interstate', c.ldInt, c.amtLDInt, ''],
+      ['','Centercom Long Distance Intrastate', c.ldIntra, c.amtLDIntra, ''],
+      ['','Centercom- Outbound', c.outMin, c.amtOutbound, ''],
+      ['','','','',''],
+      HDR,
+      ['','DID Duration', c.didMin, c.amtDIDMin, ''],
+      ['','DID Numbers', c.didCount, c.amtDIDFee, ''],
+      ['','','','',''],
+      ['','','TOTAL', c.total, ''],
+    ];
+    rows.forEach((row, r) => row.forEach((v, col) => {
+      if (v === '') return;
+      const isHdr = r === 0 || r === 4 || r === 9;
+      const isTotal = r === rows.length - 1 && col === 2;
+      const s = isHdr ? TFN_STYLE.hdr : isTotal ? TFN_STYLE.bold : TFN_STYLE.norm;
+      const z = (col === 3 && typeof v === 'number') ? DOLLAR_FMT : undefined;
+      setC(ws, r, col, v, s, z);
+    }));
+    setRef(ws, rows.length - 1, 4);
+    ws['!cols'] = [{wch:16},{wch:34},{wch:32},{wch:14},{wch:6}];
+    XLSX.utils.book_append_sheet(wb, ws, 'Summary');
+  }
+
+  // Incalls
+  {
+    const aoa = [
+      ['SourceNumber','TerminationNumber','calldatetime','Callduration_Minutes','','','Number'],
+      ...c.inRows.map((r, i) => [
+        r.SourceNumber, r.TerminationNumber, r.calldatetime, r.Callduration_Minutes,
+        '','', i < c.tfnNumbers.length ? c.tfnNumbers[i] : ''
+      ]),
+    ];
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
+    for (let C = range.s.c; C <= range.e.c; C++) {
+      const a = XLSX.utils.encode_cell({ r: 0, c: C });
+      if (ws[a]) ws[a].s = TFN_STYLE.hdr;
+    }
+    ws['!cols'] = [{wch:14},{wch:14},{wch:22},{wch:20},{wch:4},{wch:4},{wch:14}];
+    XLSX.utils.book_append_sheet(wb, ws, ' Incalls');
+  }
+
+  // Out Calls
+  {
+    const OCOLS = ['OriginationcarrierName','sourcenumber','terminationnumber','starttime','Duration_Minutes'];
+    const aoa = [OCOLS, ...c.outRows.map(r => OCOLS.map(k => r[k]))];
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
+    for (let C = range.s.c; C <= range.e.c; C++) {
+      const a = XLSX.utils.encode_cell({ r: 0, c: C });
+      if (ws[a]) ws[a].s = TFN_STYLE.hdr;
+    }
+    ws['!cols'] = [{wch:24},{wch:14},{wch:14},{wch:22},{wch:18}];
+    XLSX.utils.book_append_sheet(wb, ws, 'Out Calls');
+  }
+
+  // DID sheet
+  {
+    const aoa = [
+      ['CustomerName','DID','SourceNumber','CallConnectTime','Duration_Minutes','','','','DID Numbers','',''],
+      ...c.didRows.map((r, i) => [
+        r.CustomerName, r.DID, r.SourceNumber, r.CallConnectTime, r.Duration_Minutes,
+        '','','', i < c.didNumbers.length ? c.didNumbers[i] : '','',''
+      ]),
+    ];
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
+    for (let C = range.s.c; C <= range.e.c; C++) {
+      const a = XLSX.utils.encode_cell({ r: 0, c: C });
+      if (ws[a]) ws[a].s = TFN_STYLE.hdr;
+    }
+    ws['!cols'] = [{wch:14},{wch:14},{wch:14},{wch:22},{wch:18},{wch:4},{wch:4},{wch:4},{wch:14}];
+    XLSX.utils.book_append_sheet(wb, ws, 'DID ');
+  }
+
+  return wb;
+}
+
+// ── Build Audit sheet ─────────────────────────────────────────
+function buildAuditSheet(wb, customers, vendorBills, rates) {
+  const { nal, paricus, torch } = customers;
+  rates = rates || {};
+
+  const b382  = vendorBills.find(b => b.label === '382 Communications') || {};
+  const bMCI  = vendorBills.find(b => b.label === 'MCI/Verizon')        || {};
+  const bLI   = vendorBills.find(b => b.label === 'Lumen Interstate')   || {};
+  const bLa   = vendorBills.find(b => b.label === 'Lumen Intrastate')   || {};
+  const bIPC  = vendorBills.find(b => b.label === 'IPC')                || {};
+
+  // Profit% formula matching reference: P&L / (vendor + invoice)
+  const pct = (pl, vendor, invoice) =>
+    (vendor + invoice) > 0 ? r2((pl / (vendor + invoice)) * 100) : 0;
+
+  const ws  = XLSX.utils.aoa_to_sheet([]);
+  const W   = DOLLAR_FMT;
+  const PCT = '0.00"%"';
+
+  // Style aliases
+  const S = {
+    title:   { font: { bold: true, name: 'Arial', sz: 11 } },
+    hdr:     TFN_STYLE.hdr,
+    subhdr:  { font: { bold: true, color: { rgb: 'FFFFFF' }, name: 'Arial', sz: 10 }, fill: { fgColor: { rgb: '2E75B6' } } },
+    secLeft: { font: { bold: true, name: 'Arial', sz: 10 }, fill: { fgColor: { rgb: 'D6E4F0' } } },
+    norm:    TFN_STYLE.norm,
+    bold:    TFN_STYLE.bold,
+    total:   { font: { bold: true, name: 'Arial', sz: 10 }, fill: { fgColor: { rgb: 'BDD7EE' } } },
+    grand:   { font: { bold: true, color: { rgb: 'FFFFFF' }, name: 'Arial', sz: 11 }, fill: { fgColor: { rgb: '1F4E79' } } },
+    plPos:   { font: { bold: true, color: { rgb: '276749' }, name: 'Arial', sz: 10 }, fill: { fgColor: { rgb: 'BDD7EE' } } },
+    plNeg:   { font: { bold: true, color: { rgb: 'C53030' }, name: 'Arial', sz: 10 }, fill: { fgColor: { rgb: 'BDD7EE' } } },
+    numFee:  { font: { italic: true, name: 'Arial', sz: 10 }, fill: { fgColor: { rgb: 'EBF5FB' } } },
+  };
+
+  // Column layout:
+  // 0: Label        1: Bill Amt   2: Duration   3: Calls/Units  4: Vendor Rate
+  // 5: (sep)
+  // 6: Customer     7: Duration   8: Invoice    9: Rate w/ Markup
+  // 10: (sep)   11: P&L   12: Profit%
+  const NCOLS = 13;
+
+  let row = 0;
+
+  const sc = (r, c, v, s, z) => { if (v !== '' && v != null) setC(ws, r, c, v, s, z); };
+
+  // ── Title row ──────────────────────────────────────────────
+  sc(row, 0, 'TFN Billing Audit', S.title);
+  sc(row, 11, 'Profit / Loss', S.bold);
+  sc(row, 12, 'Profit %', S.bold);
+  row++;
+  sc(row, 1, 'Vendors', S.bold);
+  sc(row, 6, 'Invoice to Client', S.bold);
+  sc(row, 11, '(note: P&L / (cost + revenue))', { font: { italic: true, name: 'Arial', sz: 9, color: { rgb: '718096' } } });
+  row++;
+  row++; // blank
+
+  // ── Section builder ─────────────────────────────────────────
+  // leftRows: [[label, billAmt, duration, calls, vendorRate], ...]
+  // rightRows: [[customer, duration, invoiceAmt, rate], ...]  or null for blank line
+  // numFeeRows: [[label, count, amount, unitRate], ...] — styled differently
+  function writeSection(sectionLabel, leftRows, rightRows, numFeeRows, vendorTotal, invoiceTotal) {
+    // Section header
+    for (let c = 0; c < NCOLS; c++) sc(row, c, c === 0 ? sectionLabel : '', S.secLeft);
+    row++;
+
+    // Column headers
+    const hdrL = ['Date / Item', 'Bill Amount', 'Duration (min)', 'Calls', 'Vendor Rate'];
+    const hdrR = ['Customer', 'Duration (min)', 'Invoice Amount', 'Rate w/ Markup'];
+    hdrL.forEach((v, c) => sc(row, c, v, S.hdr));
+    hdrR.forEach((v, c) => sc(row, 6 + c, v, S.hdr));
+    row++;
+
+    // Merge left + right traffic rows
+    const maxTraffic = Math.max(leftRows.length, rightRows.length);
+    for (let i = 0; i < maxTraffic; i++) {
+      const L = leftRows[i]  || [null, null, null, null, null];
+      const R = rightRows[i] || [null, null, null, null];
+      if (R[0] === null) { row++; continue; } // blank row
+      sc(row, 0, L[0], S.norm);
+      if (L[1] != null) sc(row, 1, L[1], S.norm, W);
+      if (L[2] != null) sc(row, 2, L[2], S.norm);
+      if (L[3] != null) sc(row, 3, L[3], S.norm);
+      if (L[4] != null) sc(row, 4, L[4], S.norm, '$0.0000');
+      sc(row, 6, R[0], S.norm);
+      if (R[1] != null) sc(row, 7, R[1], S.norm);
+      if (R[2] != null) sc(row, 8, R[2], S.norm, W);
+      if (R[3] != null) sc(row, 9, R[3], S.norm, '$0.0000');
+      row++;
+    }
+
+    // Number fee rows (italic, shaded differently)
+    if (numFeeRows && numFeeRows.length) {
+      for (const nf of numFeeRows) {
+        sc(row, 6, nf[0], S.numFee);
+        sc(row, 7, nf[1], S.numFee);
+        sc(row, 8, nf[2], S.numFee, W);
+        sc(row, 9, nf[3], S.numFee, '$0.0000');
+        row++;
+      }
+    }
+
+    // Total row
+    const pl  = r2(invoiceTotal - vendorTotal);
+    const pp  = pct(pl, vendorTotal, invoiceTotal);
+    const plS = pl >= 0 ? S.plPos : S.plNeg;
+    sc(row, 0, 'Total:', S.total);
+    sc(row, 1, vendorTotal,   S.total, W);
+    sc(row, 6, 'Invoice Total', S.total);
+    sc(row, 8, invoiceTotal,  S.total, W);
+    sc(row, 11, pl,  plS, W);
+    sc(row, 12, pp,  plS, PCT);
+    row++;
+    row++; // blank between sections
+
+    return { vendor: vendorTotal, invoice: invoiceTotal, pl, pp };
+  }
+
+  // ── 382 Communications ───────────────────────────────────────
+  const weeks = b382.weeks || [];
+  const wkLabels = ['Week 1','Week 2','Week 3','Week 4'];
+  const left382 = wkLabels.map((lbl, i) => {
+    const w = weeks[i] || {};
+    return w.amount != null ? [lbl, w.amount, null, null, null] : null;
+  }).filter(Boolean);
+
+  const right382 = [
+    ['Centercom (Torch)', torch.tfnMin, torch.amtInbound, rates.inbound],
+    ['NorthAmericanLocal (NAL)', nal.tfnMin, nal.amtInbound, rates.inbound],
+    ['Paricus', paricus.tfnMin, paricus.amtInbound, rates.inbound],
+  ];
+
+  const numFees382 = [
+    ['NAL — TFN Numbers',    nal.tfnCount,    nal.amtTFNFee,    TFN_FEES.tfnNumberFee],
+    ['Torch — TFN Numbers',  torch.tfnCount,  torch.amtTFNFee,  TFN_FEES.tfnNumberFee],
+    ['Paricus — TFN Numbers',paricus.tfnCount,paricus.amtTFNFee,TFN_FEES.tfnNumberFee],
+  ];
+
+  const vendor382  = b382.amount || 0;
+  const invoice382 = r2(nal.amtInbound + paricus.amtInbound + torch.amtInbound +
+                        nal.amtTFNFee  + paricus.amtTFNFee  + torch.amtTFNFee);
+  const s382 = writeSection('382 Communications', left382, right382, numFees382, vendor382, invoice382);
+
+  // ── Lumen ────────────────────────────────────────────────────
+  const leftLumen = [
+    bLI.amount != null ? ['Long Distance Interstate', bLI.amount, null, null, null] : null,
+    bLa.amount != null ? ['Long Distance Intrastate', bLa.amount, null, null, null] : null,
+  ].filter(Boolean);
+
+  const rightLumen = [
+    ['Centercom — LD Interstate', torch.ldInt,   torch.amtLDInt,   rates.ldInterstate],
+    ['Centercom — LD Intrastate', torch.ldIntra, torch.amtLDIntra, rates.ldIntrastate],
+    ['NAL — LD Interstate',       nal.ldInt,     nal.amtLDInt,     rates.ldInterstate],
+    ['Paricus — LD Interstate',   paricus.ldInt, paricus.amtLDInt, rates.ldInterstate],
+  ];
+
+  const vendorLumen  = r2((bLI.amount || 0) + (bLa.amount || 0));
+  const invoiceLumen = r2(torch.amtLDInt + torch.amtLDIntra + nal.amtLDInt + paricus.amtLDInt);
+  const sLumen = writeSection('Lumen — Long Distance', leftLumen, rightLumen, null, vendorLumen, invoiceLumen);
+
+  // ── MCI / Verizon ────────────────────────────────────────────
+  const leftMCI = bMCI.amount != null
+    ? [['DID Inbound / Outbound', bMCI.amount, null, null, null]]
+    : [];
+
+  const rightMCI = [
+    ['Centercom — DID Traffic', torch.didMin,   torch.amtDIDMin,   rates.didTraffic],
+    ['Paricus — DID Traffic',   paricus.didMin, paricus.amtDIDMin, rates.didTraffic],
+  ];
+
+  const numFeesMCI = [
+    ['Torch — DID Numbers',  torch.didCount,   torch.amtDIDFee,   TFN_FEES.didNumberFee],
+    ['Paricus — DID Numbers',paricus.didCount, paricus.amtDIDFee, TFN_FEES.didNumberFee],
+  ];
+
+  const vendorMCI  = bMCI.amount || 0;
+  const invoiceMCI = r2(torch.amtDIDMin + paricus.amtDIDMin + torch.amtDIDFee + paricus.amtDIDFee);
+  const sMCI = writeSection('MCI / Verizon — DID', leftMCI, rightMCI, numFeesMCI, vendorMCI, invoiceMCI);
+
+  // ── IPC ──────────────────────────────────────────────────────
+  const leftIPC = bIPC.amount != null
+    ? [['IPC Outbound', bIPC.amount, null, null, null]]
+    : [];
+
+  const rightIPC = [
+    ['NAL — Outbound',    nal.outMin,    nal.amtOutbound,    rates.ipcOutbound],
+    ['Torch — Outbound',  torch.outMin,  torch.amtOutbound,  rates.ipcOutbound],
+    ['Paricus — Outbound',paricus.outMin,paricus.amtOutbound,rates.ipcOutbound],
+  ];
+
+  const vendorIPC  = bIPC.amount || 0;
+  const invoiceIPC = r2(nal.amtOutbound + torch.amtOutbound + paricus.amtOutbound);
+  const sIPC = writeSection('IPC — Outbound', leftIPC, rightIPC, null, vendorIPC, invoiceIPC);
+
+  // ── Grand Total ──────────────────────────────────────────────
+  const gVendor  = r2(s382.vendor  + sLumen.vendor  + sMCI.vendor  + sIPC.vendor);
+  const gInvoice = r2(s382.invoice + sLumen.invoice + sMCI.invoice + sIPC.invoice);
+  const gPL      = r2(gInvoice - gVendor);
+  const gPct     = pct(gPL, gVendor, gInvoice);
+  const gS       = gPL >= 0 ? S.plPos : S.plNeg;
+
+  for (let c = 0; c < NCOLS; c++) sc(row, c, '', S.grand);
+  sc(row, 0, 'GRAND TOTAL',  S.grand);
+  sc(row, 1, gVendor,        { ...S.grand }, W);
+  sc(row, 6, 'Total Billed', { ...S.grand });
+  sc(row, 8, gInvoice,       { ...S.grand }, W);
+  sc(row, 11, gPL,           { ...gS, fill: S.grand.fill }, W);
+  sc(row, 12, gPct,          { ...gS, fill: S.grand.fill }, PCT);
+
+  setRef(ws, row, NCOLS - 1);
+  ws['!cols'] = [
+    {wch:32},{wch:14},{wch:14},{wch:10},{wch:13},{wch:2},
+    {wch:30},{wch:14},{wch:14},{wch:14},{wch:2},{wch:14},{wch:12},
+  ];
+
+  XLSX.utils.book_append_sheet(wb, ws, 'Audit');
+}
+
+// ── Build workpaper comparison ────────────────────────────────
+function buildWorkpaperTFN(customers, vendorBills, period, rates) {
+  rates = rates || {};
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet([]);
+
+  const { nal, paricus, torch } = customers;
+  const totalCustomer = r2(nal.total + paricus.total + torch.total);
+  const totalVendor   = r2(vendorBills.reduce((s, b) => s + (b.amount || 0), 0));
+  const netProfit     = r2(totalCustomer - totalVendor);
+  const margin        = totalCustomer > 0 ? r2((netProfit / totalCustomer) * 100) : 0;
+
+  let row = 0;
+  const W = '$#,##0.00;($#,##0.00);"-"';
+
+  // Title
+  setC(ws, row,   0, '321 Communications — TFN Billing Workpaper', { font: { bold: true, name: 'Arial', sz: 13 } });
+  setC(ws, row+1, 0, period || '', TFN_STYLE.norm);
+  row += 3;
+
+  // ── VENDOR COSTS ──
+  setC(ws, row, 0, 'VENDOR COSTS',       TFN_STYLE.hdr);
+  setC(ws, row, 1, 'Invoice / File',     TFN_STYLE.hdr);
+  setC(ws, row, 2, 'Amount',             TFN_STYLE.hdr);
+  setC(ws, row, 3, 'Parse Status',       TFN_STYLE.hdr);
+  row++;
+
+  for (const bill of vendorBills) {
+    setC(ws, row, 1, bill.filename, TFN_STYLE.norm);
+    if (bill.total !== null) {
+      setC(ws, row, 2, bill.total, TFN_STYLE.norm, W);
+      setC(ws, row, 3, 'Auto-parsed', { font: { color: { rgb: '276749' }, name: 'Arial', sz: 10 } });
+    } else {
+      setC(ws, row, 2, bill.manualTotal || 0, TFN_STYLE.norm, W);
+      setC(ws, row, 3, 'Manual entry', { font: { color: { rgb: 'DD6B20' }, name: 'Arial', sz: 10 } });
+    }
+    row++;
+  }
+
+  setC(ws, row, 0, 'Total Vendor Cost',  TFN_STYLE.total);
+  setC(ws, row, 2, totalVendor,          TFN_STYLE.total, W);
+  row += 2;
+
+  // ── CUSTOMER BILLINGS ──
+  setC(ws, row, 0, 'CUSTOMER BILLINGS', TFN_STYLE.hdr);
+  setC(ws, row, 1, 'Customer',          TFN_STYLE.hdr);
+  setC(ws, row, 2, 'Amount Billed',     TFN_STYLE.hdr);
+  setC(ws, row, 3, 'Detail',            TFN_STYLE.hdr);
+  row++;
+
+  const custRows = [
+    { name: 'North American Local (NAL)', total: nal.total,
+      detail: `TFN In ${nal.tfnMin} min | LD Int ${nal.ldInt} min | Out ${nal.outMin} min | ${nal.tfnCount} TFN#` },
+    { name: 'Paricus', total: paricus.total,
+      detail: `TFN In ${paricus.tfnMin} min | LD Int ${paricus.ldInt} min | Out ${paricus.outMin} min | DID ${paricus.didMin} min | ${paricus.tfnCount} TFN# | ${paricus.didCount} DID#` },
+    { name: 'Torch Wireless (Centercom)', total: torch.total,
+      detail: `TFN In ${torch.tfnMin} min | LD Int ${torch.ldInt} min | Intra ${torch.ldIntra} min | Out ${torch.outMin} min | DID ${torch.didMin} min | ${torch.tfnCount} TFN# | ${torch.didCount} DID#` },
+  ];
+
+  for (const c of custRows) {
+    setC(ws, row, 1, c.name,   TFN_STYLE.norm);
+    setC(ws, row, 2, c.total,  TFN_STYLE.norm, W);
+    setC(ws, row, 3, c.detail, TFN_STYLE.norm);
+    row++;
+  }
+
+  setC(ws, row, 0, 'Total Customer Billing', TFN_STYLE.total);
+  setC(ws, row, 2, totalCustomer,             TFN_STYLE.total, W);
+  row += 2;
+
+  // ── PROFIT SUMMARY ──
+  setC(ws, row, 0, 'PROFIT SUMMARY', TFN_STYLE.hdr);
+  row++;
+  setC(ws, row, 0, 'Total Vendor Cost',     TFN_STYLE.norm);
+  setC(ws, row, 2, totalVendor,              TFN_STYLE.norm, W);
+  row++;
+  setC(ws, row, 0, 'Total Customer Billing', TFN_STYLE.norm);
+  setC(ws, row, 2, totalCustomer,             TFN_STYLE.norm, W);
+  row++;
+  setC(ws, row, 0, 'Net Profit / (Loss)', TFN_STYLE.total);
+  setC(ws, row, 2, netProfit,              { font: { bold: true, name: 'Arial', sz: 10, color: { rgb: netProfit >= 0 ? '276749' : 'C53030' } } }, W);
+  row++;
+  setC(ws, row, 0, 'Margin %', TFN_STYLE.norm);
+  setC(ws, row, 2, margin / 100, TFN_STYLE.norm, '0.0%;(0.0%);"-"');
+
+  setRef(ws, row, 3);
+  ws['!cols'] = [{wch:30},{wch:34},{wch:18},{wch:70}];
+  XLSX.utils.book_append_sheet(wb, ws, 'TFN Workpaper');
+
+  // Rate Reference sheet
+  const refWS = XLSX.utils.aoa_to_sheet([]);
+  const refRows = [
+    ['Rate Reference — 321 Comm TFN', '', ''],
+    ['', '', ''],
+    ['Service', 'Unit', 'Rate'],
+    ['TFN Inbound (382)', 'per minute', rates.inbound      || 0],
+    ['TFN Number Fee', 'per number/month', TFN_FEES.tfnNumberFee],
+    ['DID Traffic (MCI/Verizon)', 'per minute', rates.didTraffic   || 0],
+    ['DID Number Fee', 'per number/month', TFN_FEES.didNumberFee],
+    ['Long Distance Interstate (Lumen)', 'per minute', rates.ldInterstate || 0],
+    ['Long Distance Intrastate (Lumen)', 'per minute', rates.ldIntrastate || 0],
+    ['IPC Outbound', 'per minute', rates.ipcOutbound  || 0],
+  ];
+  refRows.forEach((r, ri) => r.forEach((v, ci) => {
+    if (v === '') return;
+    const s = ri === 0 ? { font: { bold: true, name: 'Arial', sz: 12 } } :
+              ri === 2 ? TFN_STYLE.hdr :
+              TFN_STYLE.norm;
+    const z = (ci === 2 && typeof v === 'number') ? '$0.0000' : undefined;
+    setC(refWS, ri, ci, v, s, z);
+  }));
+  setRef(refWS, refRows.length - 1, 2);
+  refWS['!cols'] = [{wch:36},{wch:22},{wch:14}];
+  XLSX.utils.book_append_sheet(wb, refWS, 'Rate Reference');
+
+  buildAuditSheet(wb, customers, vendorBills, rates);
+
+  return wb;
+}
+
+// ── Try to extract total from PDF text ───────────────────────
+async function extractPDFTotal(filePath) {
+  if (!pdfParse) return null;
+  try {
+    const buf  = fs.readFileSync(filePath);
+    const data = await pdfParse(buf);
+    const text = data.text || '';
+
+    // Match patterns like "Total Due $1,234.56" or "Amount Due: 1,234.56"
+    const patterns = [
+      /(?:total\s+(?:amount\s+)?due|amount\s+due|invoice\s+total|total\s+charges?|balance\s+due)[:\s$]*(\d[\d,]*\.\d{2})/i,
+      /(?:total)[:\s$]+(\d[\d,]*\.\d{2})\s*$/im,
+    ];
+    for (const re of patterns) {
+      const m = text.match(re);
+      if (m) return parseFloat(m[1].replace(/,/g, ''));
+    }
+
+    // Last-resort: find all dollar amounts in last 500 chars and take the largest
+    const tail    = text.slice(-500);
+    const amounts = [...tail.matchAll(/\$?\s*(\d[\d,]*\.\d{2})/g)]
+      .map(m => parseFloat(m[1].replace(/,/g, '')))
+      .filter(n => n > 0);
+    if (amounts.length > 0) return Math.max(...amounts);
+  } catch(e) { /* ignore */ }
+  return null;
+}
+
+// ── In-memory temp file store ────────────────────────────────
+const tfnTempStore = new Map(); // token → { files: {name→path}, ts }
+
+function tfnStorePaths(paths) {
+  const token = `tfn_${Date.now()}_${Math.random().toString(36).slice(2,7)}`;
+  tfnTempStore.set(token, { files: paths, ts: Date.now() });
+  // Expire after 30 minutes
+  setTimeout(() => {
+    const entry = tfnTempStore.get(token);
+    if (entry) {
+      for (const p of Object.values(entry.files)) { try { if (fs.existsSync(p)) fs.unlinkSync(p); } catch(e){} }
+      tfnTempStore.delete(token);
+    }
+  }, 30 * 60 * 1000);
+  return token;
+}
+
+// ── Upload config ────────────────────────────────────────────
+const tfnUpload = upload.fields([
+  { name: 'gopalFile',        maxCount: 1 },
+  { name: 'ipcFile',          maxCount: 1 },
+  { name: 'inventoryFile',    maxCount: 1 },
+  { name: 'didInventoryFile', maxCount: 1 },
+  { name: 'bill382',          maxCount: 4 },
+  { name: 'billMCI',          maxCount: 1 },
+  { name: 'billLumen',        maxCount: 1 },
+  { name: 'billIPC',          maxCount: 1 },
+]);
+
+// ── Try to extract a named amount from PDF text ──────────────
+// Looks for keyword near a dollar amount in the last ~1500 chars
+async function extractPDFAmount(filePath, keywords) {
+  if (!pdfParse || !filePath) return null;
+  try {
+    const data = await pdfParse(fs.readFileSync(filePath));
+    const text = data.text || '';
+    const tail = text.slice(-1500);
+    for (const kw of keywords) {
+      const re = new RegExp(kw + '[^\\d$]*\\$?([\\d,]+\\.\\d{2})', 'i');
+      const m  = tail.match(re) || text.match(re);
+      if (m) return parseFloat(m[1].replace(/,/g, ''));
+    }
+    // fallback: largest dollar amount in tail
+    const nums = [...tail.matchAll(/\$?([\d,]+\.\d{2})/g)]
+      .map(m => parseFloat(m[1].replace(/,/g, ''))).filter(n => n > 0);
+    return nums.length ? Math.max(...nums) : null;
+  } catch { return null; }
+}
+
+// ── POST /api/tfn/process ────────────────────────────────────
+app.post('/api/tfn/process', tfnUpload, async (req, res) => {
+  const gopalFile        = req.files?.['gopalFile']?.[0];
+  const ipcFile          = req.files?.['ipcFile']?.[0];
+  const inventoryFile    = req.files?.['inventoryFile']?.[0];
+  const didInventoryFile = req.files?.['didInventoryFile']?.[0];
+  const bill382Files     = req.files?.['bill382'] || [];
+  const billMCIFile      = req.files?.['billMCI']?.[0];
+  const billLumenFile    = req.files?.['billLumen']?.[0];
+  const billIPCFile      = req.files?.['billIPC']?.[0];
+  const manualBody       = req.body || {};
+
+  if (!gopalFile) return res.status(400).json({ error: 'Gopal CDR file is required.' });
+
+  const cleanupFiles = (...files) => files.forEach(f => { try { if (f?.path && fs.existsSync(f.path)) fs.unlinkSync(f.path); } catch(e){} });
+
+  try {
+    const gopal              = parseGopalFile(gopalFile.path);
+    const inventoryCounts    = inventoryFile    ? parseTFNInventory(inventoryFile.path)    : {};
+    const ipcOutbound        = ipcFile          ? parseIPCOutboundFile(ipcFile.path)       : {};
+    const didInventoryCounts = didInventoryFile ? parseDIDInventory(didInventoryFile.path) : {};
+
+    // ── Parse vendor bill amounts ─────────────────────────────
+    const parseAmt = async (file, keywords, manualKey) => {
+      const manual = parseFloat(manualBody[manualKey] || '') || null;
+      if (manual) return { amount: manual, parsedOK: false, manualUsed: true };
+      const parsed = await extractPDFAmount(file?.path, keywords);
+      return { amount: parsed, parsedOK: parsed !== null, manualUsed: false };
+    };
+
+    // Parse 4 weekly 382 invoices
+    const weeks382 = await Promise.all(
+      [1,2,3,4].map(w => parseAmt(bill382Files[w-1], ['Total Due','Amount Due','Invoice Total'], `manual382_w${w}`))
+    );
+    // Total 382 = sum of all weeks that have an amount
+    const total382Amount = weeks382.reduce((s, w) => s + (w.amount || 0), 0);
+    const any382Parsed   = weeks382.some(w => w.parsedOK);
+    const any382Manual   = weeks382.some(w => w.manualUsed);
+    const b382 = {
+      amount:     total382Amount || null,
+      parsedOK:   any382Parsed,
+      manualUsed: any382Manual,
+      weeks:      weeks382,
+    };
+
+    const [bMCI, bLumenInter, bLumenIntra, bIPC] = await Promise.all([
+      parseAmt(billMCIFile,   ['Total Due','Amount Due','Invoice Total'], 'manualMCI'),
+      parseAmt(billLumenFile, ['Interstate'],                             'manualLumenInter'),
+      parseAmt(billLumenFile, ['Intrastate'],                            'manualLumenIntra'),
+      parseAmt(billIPCFile,   ['Total Due','Amount Due','Invoice Total'], 'manualIPC'),
+    ]);
+
+    const vendorBills = [
+      { label: '382 Communications', filenames: bill382Files.map(f=>f.originalname), ...b382 },
+      { label: 'MCI/Verizon',        filename: billMCIFile?.originalname  || null, ...bMCI },
+      { label: 'Lumen Interstate',   filename: billLumenFile?.originalname|| null, ...bLumenInter },
+      { label: 'Lumen Intrastate',   filename: billLumenFile?.originalname|| null, ...bLumenIntra },
+      { label: 'IPC',                filename: billIPCFile?.originalname  || null, ...bIPC },
+    ];
+
+    const needsManualEntry = vendorBills.some(b => b.amount == null);
+
+    if (needsManualEntry && !Object.keys(manualBody).length) {
+      cleanupFiles(gopalFile, ipcFile, inventoryFile, didInventoryFile, ...bill382Files, billMCIFile, billLumenFile, billIPCFile);
+      return res.json({ needsManualEntry: true, vendorBills });
+    }
+
+    // ── Compute dynamic rates ─────────────────────────────────
+    const totMins = computeTotalMins(gopal.summary, ipcOutbound);
+    const invoices = {
+      amt382:        b382.amount        || 0,
+      amtMCI:        bMCI.amount        || 0,
+      amtLumenInter: bLumenInter.amount || 0,
+      amtLumenIntra: bLumenIntra.amount || 0,
+      amtIPC:        bIPC.amount        || 0,
+    };
+    const rates = computeRates(invoices, totMins);
+
+    const customers = computeTFNCustomers(gopal, inventoryCounts, ipcOutbound, didInventoryCounts, rates);
+
+    // Determine period label
+    const summaryWS = XLSX.readFile(gopalFile.path).Sheets['Summary'];
+    const firstCell = summaryWS ? summaryWS['A1'] : null;
+    let periodLabel = '';
+    if (firstCell && typeof firstCell.v === 'number') {
+      const d = XLSX.SSF.parse_date_code(firstCell.v);
+      periodLabel = `${d.y}`;
+    }
+
+    // Build Excel files
+    const nalWb     = buildNALWorkbookTFN(customers.nal);
+    const paricusWb = buildParicusWorkbookTFN(customers.paricus);
+    const torchWb   = buildTorchWorkbookTFN(customers.torch);
+    const wpWb      = buildWorkpaperTFN(customers, vendorBills, `321 Comm TFN — ${periodLabel}`, rates);
+
+    const ts = Date.now();
+    const outPaths = {
+      'NAL':       path.join('uploads', `tfn_nal_${ts}.xlsx`),
+      'Paricus':   path.join('uploads', `tfn_paricus_${ts}.xlsx`),
+      'Torch':     path.join('uploads', `tfn_torch_${ts}.xlsx`),
+      'Workpaper': path.join('uploads', `tfn_workpaper_${ts}.xlsx`),
+    };
+
+    const xlsxOpts = { bookType: 'xlsx', type: 'binary', cellStyles: true };
+    XLSX.writeFile(nalWb,     outPaths['NAL'],       xlsxOpts);
+    XLSX.writeFile(paricusWb, outPaths['Paricus'],   xlsxOpts);
+    XLSX.writeFile(torchWb,   outPaths['Torch'],     xlsxOpts);
+    XLSX.writeFile(wpWb,      outPaths['Workpaper'], xlsxOpts);
+
+    cleanupFiles(gopalFile, ipcFile, inventoryFile, didInventoryFile, ...bill382Files, billMCIFile, billLumenFile, billIPCFile);
+
+    const token = tfnStorePaths(outPaths);
+
+    res.json({
+      token,
+      vendorBills,
+      rates,
+      totMins,
+      summary: {
+        nal:    { total: customers.nal.total,    tfnNums: customers.nal.tfnCount,    tfnMin: customers.nal.tfnMin },
+        paricus:{ total: customers.paricus.total, tfnNums: customers.paricus.tfnCount, didNums: customers.paricus.didCount, tfnMin: customers.paricus.tfnMin, didMin: customers.paricus.didMin },
+        torch:  { total: customers.torch.total,  tfnNums: customers.torch.tfnCount,  didNums: customers.torch.didCount, tfnMin: customers.torch.tfnMin, didMin: customers.torch.didMin },
+        totalCustomer: r2(customers.nal.total + customers.paricus.total + customers.torch.total),
+        totalVendor:   r2(vendorBills.reduce((s, b) => s + (b.amount || 0), 0)),
+      },
+      needsManualEntry,
+    });
+  } catch (err) {
+    console.error(err);
+    cleanupFiles(gopalFile, ipcFile, inventoryFile, didInventoryFile, ...bill382Files, billMCIFile, billLumenFile, billIPCFile);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET /api/tfn/download/:token/:type ──────────────────────
+app.get('/api/tfn/download/:token/:type', (req, res) => {
+  const entry = tfnTempStore.get(req.params.token);
+  if (!entry) return res.status(404).json({ error: 'File not found or expired. Please re-process.' });
+  const filePath = entry.files[req.params.type];
+  if (!filePath || !fs.existsSync(filePath)) return res.status(404).json({ error: 'File not found.' });
+
+  const fileNames = {
+    'NAL':      'NAL_TFN_Customer_File.xlsx',
+    'Paricus':  'Paricus_TFN_Customer_File.xlsx',
+    'Torch':    'Torch_TFN_Customer_File.xlsx',
+    'Workpaper':'TFN_Workpaper_Summary.xlsx',
+  };
+  res.download(filePath, fileNames[req.params.type] || 'output.xlsx');
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`AT&T Data Processor running at http://localhost:${PORT}`));
